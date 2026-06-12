@@ -5,6 +5,7 @@ from ros_actor import actor, SubNet
 from ..pointlib import PointEx
 from geometry_msgs.msg import Twist
 from tf_transformations import euler_from_quaternion 
+import time
 
 SPEED = 0.03
 TURN = 0.3
@@ -24,6 +25,14 @@ class ApproachAction(SubNet):
     @actor
     def stop(self):
         self.move(0)
+
+    @actor
+    def walk(self, distance):
+        duration = distance / SPEED
+        start_time = time.time()
+        while (time.time() - start_time) < duration:
+            self.move()
+        self.run_actor("stop")
     
     # direct command to motor
     @actor    
@@ -48,13 +57,19 @@ class ApproachAction(SubNet):
         assumed = -1
         current = 0
         if speed > 0.5:
+            # pid = PID(-10, 0, -0.25,
+            #         output_limits=(radians(-80),radians(80)))
+            # print('PID,-10,0,-0.25', file=f)
             pid = PID(-10, 0, -0.25,
-                    output_limits=(radians(-80),radians(80)))
-            print('PID,-10,0,-0.25', file=f)
+                    output_limits=(radians(-40),radians(40)))
+            print('PID,-10,0,-0.1', file=f)
         else:
+            # pid = PID(-10, 0, -0.05,
+            #         output_limits=(radians(-80),radians(80)))
+            # print('PID,-10,0,-0.25', file=f)
             pid = PID(-10, 0, -0.05,
-                    output_limits=(radians(-80),radians(80)))
-            print('PID,-10,0,-0.05', file=f)
+                    output_limits=(radians(-40),radians(40)))
+            print('PID,-10,0,-0.1', file=f)
 
         while True:
             log = {}
@@ -78,6 +93,7 @@ class ApproachAction(SubNet):
             d_y = y - start_y
             last_current = current
             current = sqrt(d_x**2 + d_y**2)
+            print(f"{distance=}")
             if distance > 0:
                 assumed = distance
             else:
@@ -98,9 +114,9 @@ class ApproachAction(SubNet):
         start_x, start_y, _ = self.get_odom()
         assumed = -1
         current = 0
-        pid = PID(-15, 0, -0.05,
-            output_limits=(radians(-80),radians(80)))
-        print('PID,-15,0,-0.05', file=f)
+        pid = PID(-5, 0, -0.05,
+            output_limits=(radians(-40),radians(40)))
+        print('PID,-7,0,-0.05', file=f)
 
         while True:
             log = {}
@@ -150,7 +166,7 @@ class ApproachAction(SubNet):
         
     # adjust location
     @actor
-    def reach_coke(self, target=0.26):
+    def reach_coke(self, target=0.28):
         trans = self.run_actor('map_trans')
         start = PointEx(0.0, 0.0)
         start.setTransform(trans.transform)

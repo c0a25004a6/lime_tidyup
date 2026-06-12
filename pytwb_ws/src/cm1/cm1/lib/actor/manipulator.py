@@ -23,7 +23,7 @@ class ManipulatorNetwork(SubNet):
     @actor
     def home(self):
 #        joint = [0.0, 1.0, 1.575, 0.0, -1.0, 0.0]
-        joint = [0.0, radians(23), radians(80), 0.0, -radians(14), 0.0]
+        joint = [0.0, radians(-63), radians(107), 0.0, radians(56), 0.0]
         self.run_actor('move_joint', *joint)
         return True
 
@@ -92,6 +92,9 @@ class ManipulatorNetwork(SubNet):
     @actor
     def open(self):
         self.run_actor('open_gripper')
+        try: self.run_actor("detach")
+        except TypeError: pass
+        
         self.run_actor('sleep', 2)
         return True
 
@@ -99,16 +102,13 @@ class ManipulatorNetwork(SubNet):
     @actor
     def close(self):
         self.run_actor('close_gripper')
+        self.run_actor("attach")
         return True
     
     @actor
     def full_close(self):
         gripper = self.get_value('gripper')
-        goal = GripperCommandAction.Goal()
-        goal.command.position = 0.012
-        goal.command.max_effort = 0.0
-        gripper.move_to_configuration(goal)
-        wait_until_executed(gripper)
+        gripper.move_to_position(-0.01)
         self.run_actor('sleep', 2)
         return True
 
@@ -118,7 +118,7 @@ class ManipulatorNetwork(SubNet):
         gripper.open()
         wait_until_executed(gripper)
         return True
-   
+
     @actor
     def close_gripper(self):
         gripper = self.get_value('gripper')
@@ -276,3 +276,15 @@ class ManipulatorNetwork(SubNet):
         state_dict = dict(zip(state.name, state.position))
         return state_dict
         
+    @actor
+    def arm_angle(self, j1=0, j2=0, j3=0, j4=0, j5=0, j6=0):
+        joint = [radians(j1), radians(j2), radians(j3), radians(j4), radians(j5), radians(j6)]
+        self.run_actor('move_joint', *joint)
+        return True
+    
+# register_pose {register_name} j1 j2 j3 j4 j5 j6
+# で動かせるactor登録actorがあったら良いのになあ
+# 尚、登録機はactorでなくてもよい。。。けど、まあactorが良いか。
+# 名前被りは"名前被りだ！"って言えるように、全部の関数名を正規表現とかでリストにしたい。つまるところアームだけで良い。
+# behaviorにはならんが。
+# そういえば、勝手にmigrationしてくれるやつを作りたい。

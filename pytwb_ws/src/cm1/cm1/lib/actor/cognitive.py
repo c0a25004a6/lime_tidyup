@@ -7,7 +7,19 @@ from lib.pointlib import PointEx, PointBag
 import cv2
 import pyrealsense2 as rs
 
+import sys
+
+detector_dir = '/root/practice_ws/images'
+if detector_dir not in sys.path:
+    sys.path.append(detector_dir)
+# import circle_center_detector, color_center_detector, marker_detector
+import importlib
+
 class CognitiveNetwork(SubNet):
+    def __init__(self, name):
+        super().__init__(name)
+        self.detector = None
+
     @actor
     def carib(self):
         x,y,_ = self.run_actor('object_loc', target='base_link')
@@ -16,10 +28,25 @@ class CognitiveNetwork(SubNet):
     # Get the coordinates of the object in the arm coordinate system
     @actor  
     def object_loc(self, target='link1'):
-        while True:
-            point = self.run_actor('find_object')
-            if point: break
-            self.run_actor('sleep', 1)
+        # while True:
+        #     point = self.run_actor('find_object')
+        #     if point: break
+        #     self.run_actor('sleep', 1)
+        point = self.run_actor('find_object')
+        if point is None: return False
+        self.run_actor('sleep', 1)
+#        print(f'object_loc x:{point._x}, y:{point._y}')
+        trans = self.run_actor('var_trans', target)
+        point.setTransform(trans.transform)
+#        angle = atan2(point.y, point.x) + radians(1.05)
+        angle = atan2(point.y, point.x) * 1.34
+        return point.x, point.y, angle
+
+    @actor  
+    def object_front(self, target='link1'):
+        point = self.run_actor('find_object', True)
+        if point is None: return False
+        self.run_actor('sleep', 1)
 #        print(f'object_loc x:{point._x}, y:{point._y}')
         trans = self.run_actor('var_trans', target)
         point.setTransform(trans.transform)
@@ -30,12 +57,16 @@ class CognitiveNetwork(SubNet):
     # get target location by map coordinate
     @actor
     def object_glance(self):
-        while True:
-            trans = self.run_actor('map_trans')
-            point = self.run_actor('find_object')
-            if point: break
+        # while True:
+        #     trans = self.run_actor('map_trans')
+        #     point = self.run_actor('find_object')
+        #     if point: break
+        trans = self.run_actor('map_trans')
+        point = self.run_actor('find_object')
+        if point is None: return False
 #        trans = self.run_actor('map_trans') # avoid delays in receiving odom
         point.setTransform(trans.transform)
+        print(f"{point.x:.3f} {point.y:.3f}")
         return point.x, point.y
     
     def register_flist(self, cand_points, point):
@@ -86,7 +117,7 @@ class CognitiveNetwork(SubNet):
         return ('close', lambda tran: depth_tran.close(depth_tran)),
 
     @actor
-    def measure_center(self, target='link1', assumed=0.25, log=None):
+    def measure_center(self, target='link1', assumed=0.28, log=None):
         data = self.run_actor('depth')
         cv_bridge = self.get_value('cv_bridge')
         depth_image = cv_bridge.imgmsg_to_cv2(data)
@@ -96,9 +127,12 @@ class CognitiveNetwork(SubNet):
         distance = det_line[index] / 1000
         actual_distance = distance
         center = self.run_actor('pic_find')
+        if not center: 
+            return None
         index = center[0] # by pic cell
         zp = center[1] # by pic cell
-        if not center: return 0, 0, 0, 0
+        if not center: 
+            return 0, 0, 0, 0
         if distance < 0.1:
             if assumed > 0:
                 distance = assumed
@@ -182,7 +216,7 @@ class CognitiveNetwork(SubNet):
 
     # find object location
     @actor
-    def find_object(self):
+    def find_object(self, minus: bool = False):
         center = self.run_actor('pic_find')
         if not center: return None
         data = self.run_actor('depth')
@@ -197,6 +231,10 @@ class CognitiveNetwork(SubNet):
         if distance == 0:
             print('find_object zero distance')
             distance = 0.2
+        else:
+            if minus:
+                print("It will stop early.")
+                distance -= 0.20
         target_x, target_y = self.pix_to_coordinate(yp, zp, distance)        
         point = PointEx(target_x, target_y)
         point.v_x = target_x
@@ -230,11 +268,20 @@ class CognitiveNetwork(SubNet):
         ret = None
         with self.run_actor_mode('pic_receiver', 'timed_iterator', 10) as pic_iter:
             for cv_image in pic_iter:
-                ret = self.find_coke(cv_image)
-                if ret[0] >= 0:
-                    self.cv_image = cv_image
-                    self.pic_shape = cv_image.shape
-                    break
+                if self.detector is not None:
+                    if self.marker_id is not None:
+                        ret = self.detector(cv_image, self.marker_id) # marker認識
+                    else:
+                        ret = self.detector(cv_image)
+                else:
+                    ret = self.find_coke(cv_image)
+                try:
+                    if ret[0] >= 0:
+                        self.cv_image = cv_image
+                        self.pic_shape = cv_image.shape
+                        break
+                except TypeError:
+                    return False
         if ret[0] < 0: return None
         return ret
     
@@ -297,7 +344,7 @@ class CognitiveNetwork(SubNet):
         point.distance = distance 
 #        print(f'find_object x:{target_x}, y:{target_y}, distance:{distance}')
         return point
-    
+
     def find_coke(self, cv_img):
         hsv_img = cv2.cvtColor(cv_img, cv2.COLOR_BGR2HSV)
 
@@ -321,4 +368,51 @@ class CognitiveNetwork(SubNet):
         if w == 0:
             return -1, -1
         else:
-            return int(x / w), int(y / w)   
+            return int(x / w), int(y / w)  
+
+    @actor
+    def read_marker(self):
+        input_img = self.run_actor('pic_receiver')
+        # get dicionary and get parameters
+        dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_6X6_250)
+        parameters = cv2.aruco.DetectorParameters_create()
+
+        _, ids, _ = cv2.aruco.detectMarkers(input_img, dictionary, parameters=parameters)
+        # print(ids)
+        return ids
+
+    @actor
+    def set_detector(self, full_name, n=None):
+        try: module_name, func_name = full_name.rsplit(".", 1)
+        except ValueError: 
+            print("need to set module_name.func_name, Aborted")
+            return False
+        self.marker_id = None
+        if module_name == "marker":
+            if n is None:
+                print("Need ids, Aborted.")
+                return False
+            else:
+                self.marker_id = n
+        else:
+            if self.marker_id:
+                self.marker_id = None
+        try:
+            module = importlib.import_module(module_name)
+            self.detector = getattr(module, func_name)
+        except (ModuleNotFoundError, AttributeError):
+            print("module or function doesn't exist, Aborted")
+            self.marker_id = None
+            return False
+        return True
+    
+    @actor
+    def set_func(self, full_name):
+        module_name, func_name = full_name.rsplit(".", 1)
+        module = importlib.import_module(module_name)
+        self.func = getattr(module, func_name)
+        return True
+    
+    @actor
+    def use_func(self):
+        return self.func()
