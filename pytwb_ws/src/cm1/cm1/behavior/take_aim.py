@@ -3,36 +3,36 @@ from lib.actor_bt import ActorBT
 
 
 @behavior
-class SearchCube(ActorBT):
-    desc = 'search cube until centered'
+class TakeAim(ActorBT):
+    desc = 'turn toward cube center'
 
     def __init__(
         self,
         name,
         node,
-        threshold=0.30,
-        center_tolerance=120.0,
-        image_width=848.0
+        threshold=0.50,
+        turn_speed=0.20,
+        center_tolerance=20.0
     ):
-        super(SearchCube, self).__init__(
+        super(TakeAim, self).__init__(
             name,
             'navigation'
         )
 
         self.threshold = float(threshold)
+        self.turn_speed = float(turn_speed)
         self.center_tolerance = float(center_tolerance)
-        self.image_width = float(image_width)
 
     def initialise(self):
         super().prepare()
 
         self.shared.set_callee([
             (
-                'search_cube',
+                'take_aim',
                 (
                     self.threshold,
-                    self.center_tolerance,
-                    self.image_width
+                    self.turn_speed,
+                    self.center_tolerance
                 )
             )
         ])
