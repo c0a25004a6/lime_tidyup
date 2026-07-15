@@ -1,16 +1,17 @@
-from math import atan2, degrees, radians, hypot
 import os
+import re
+import subprocess
+from math import atan2, degrees, hypot, radians
 
-from pyquaternion import Quaternion
-
-from pytwb import lib_main
-from ros_actor import SubNet, actor, register_bt
-from ..pointlib import PointEx
 import cv2
 import numpy as np
 import pyrealsense2 as rs
-import subprocess
-import re
+from pyquaternion import Quaternion
+from pytwb import lib_main
+from ros_actor import SubNet, actor, register_bt
+
+from ..pointlib import PointEx
+
 
 class Tools(SubNet):
     # command version
@@ -19,18 +20,19 @@ class Tools(SubNet):
         arg = list(map(float, arg))
         while len(arg) < 3:
             arg.append(0.0)
-        return self.run_actor('goto', arg[0], arg[1], arg[2])
+        return self.run_actor("goto", arg[0], arg[1], arg[2])
 
     @actor
     def update_bt(self):
         package = lib_main.get_package()
-        dir = os.path.join(package.path, 'trees')
+        dir = os.path.join(package.path, "trees")
         for d in os.listdir(dir):
-            if not d.endswith('.xml'): continue
+            if not d.endswith(".xml"):
+                continue
             name = d[:-4]
             register_bt(name)
         return True
-    
+
     # show gripper pose
     @actor
     def gl(self):
@@ -43,77 +45,81 @@ class Tools(SubNet):
         rot_point = q_rot.rotate(point)
         x = rot_point[0] + offset.x
         y = rot_point[1] + offset.y
-        print(f'gripper angle:{degrees(atan2(y, x))}')
-    
+        print(f"gripper angle:{degrees(atan2(y, x))}")
+
     @actor
     def forward(self, value):
-        self.run_actor('adjust_joint', 0.0, value, 0.0, 0.0)
-    
+        self.run_actor("adjust_joint", 0.0, value, 0.0, 0.0)
+
     @actor
     def ol(self):
-        _,_,target_angle,distance = self.run_actor('measure_center', target='base_link', assumed=0.2)
-        print(f'target_angle:{degrees(target_angle)}, distance:{distance}')
-    
+        _, _, target_angle, distance = self.run_actor(
+            "measure_center", target="base_link", assumed=0.2
+        )
+        print(f"target_angle:{degrees(target_angle)}, distance:{distance}")
+
     @actor
     def tl(self):
-        _, _, angle = self.run_actor('object_loc', 'base_link')
-        point = self.run_actor('find_object')
-        print(f'object angle:{degrees(angle)}, distance:{point.distance}') 
-    
-    @actor    
+        _, _, angle = self.run_actor("object_loc", "base_link")
+        point = self.run_actor("find_object")
+        print(f"object angle:{degrees(angle)}, distance:{point.distance}")
+
+    @actor
     def js(self):
-        value = self.get_value('joint_stat')
+        value = self.get_value("joint_stat")
         d_value = tuple(map(degrees, value))
         print(d_value)
-    
+
     @actor
     def cpos(self):
         root = PointEx()
         ref = PointEx(1.0, 0.0)
-        trans = self.run_actor('map_trans')
-        if not trans: return
+        trans = self.run_actor("map_trans")
+        if not trans:
+            return
         root.setTransform(trans.transform)
         ref.setTransform(trans.transform)
-        print(f'x:{root.x}, y:{root.y}, z:{degrees(root.z)}')
+        print(f"x:{root.x}, y:{root.y}, z:{degrees(root.z)}")
         rx = ref.x - root.x
         ry = ref.y - root.y
         robot_angle = atan2(ry, rx)
-        print(f'robot angle to X axis: {degrees(robot_angle)}')
-    
+        print(f"robot angle to X axis: {degrees(robot_angle)}")
+
     @actor
     def pause(self, is_on=True):
-        if is_on: input('debug pause')
+        if is_on:
+            input("debug pause")
         return True
-    
+
     @actor
     def key(self):
         return input()
 
     @actor
     def angle(self):
-        print(f'assumed:{degrees(atan2(0.5, 1.0))}')
-        x, y, angle = self.run_actor('object_loc')
-        print(f'angle:{degrees(angle)}')
+        print(f"assumed:{degrees(atan2(0.5, 1.0))}")
+        x, y, angle = self.run_actor("object_loc")
+        print(f"angle:{degrees(angle)}")
 
     @actor
     def gripper_angle(self, angle):
-        gripper = self.get_value('gripper')
+        gripper = self.get_value("gripper")
         gripper.move_to_position(angle)
-        self.run_actor('sleep', 2)
+        self.run_actor("sleep", 2)
         return True
-    
+
     @actor
     def get_gripper(self):
-        joints = self.run_actor('joints')
-        target_joint = 'gripper_left_joint'
+        joints = self.run_actor("joints")
+        target_joint = "gripper_left_joint"
         idx = joints.name.index(target_joint)
         pos = round(joints.position[idx], 2)
         return pos
-    
+
     @actor
     def get_arm_angle(self):
-        joints = self.run_actor('joints')
-        target_joint = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6']
+        joints = self.run_actor("joints")
+        target_joint = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"]
         angle_list = []
         for i in target_joint:
             idx = joints.name.index(i)
@@ -121,18 +127,18 @@ class Tools(SubNet):
             angle_list.append(pos)
         return angle_list
 
-    @actor 
+    @actor
     def shot(self, fpath):
         print("shot start")
-        cv_image = self.run_actor('pic_receiver')
+        cv_image = self.run_actor("pic_receiver")
         pt = fpath + ".png"
         cv2.imwrite(pt, cv_image)
-    
+
     @actor
     def depth_shot(self, fpath):
-        data = self.run_actor('depth')
-        cv_bridge = self.get_value('cv_bridge')
-        depth_image = cv_bridge.imgmsg_to_cv2(data, desired_encoding='passthrough')
+        data = self.run_actor("depth")
+        cv_bridge = self.get_value("cv_bridge")
+        depth_image = cv_bridge.imgmsg_to_cv2(data, desired_encoding="passthrough")
         # 適切な画像になるように正規化している
         normalized_depth = cv2.normalize(depth_image, None, 0, 255, cv2.NORM_MINMAX)
         normalized_depth = np.uint8(normalized_depth)
@@ -141,9 +147,9 @@ class Tools(SubNet):
         cv2.imwrite(pt, normalized_depth)
 
     def pix_to_coordinate(self, x, y, distance):
-        intrinsics = self.get_value('intrinsics')
-        p = rs.rs2_deproject_pixel_to_point(intrinsics,[x,y], distance)
-        return p[2],-p[0]
+        intrinsics = self.get_value("intrinsics")
+        p = rs.rs2_deproject_pixel_to_point(intrinsics, [x, y], distance)
+        return p[2], -p[0]
 
     @actor
     def go_front(self):
@@ -156,13 +162,13 @@ class Tools(SubNet):
         if obj is None:
             print("No object. Aborted")
             return False
-        
+
         link = self.run_actor("get_linkname", obj)
 
         cmd = f"""ros2 service call /ATTACHLINK linkattacher_msgs/srv/AttachLink "{{model1_name: 'turtlebot3_lime_system', link1_name: 'link7', model2_name: '{obj}', link2_name: '{link}'}}" """
         subprocess.run(cmd, shell=True)
         return True
-    
+
     @actor
     def detach(self):
         obj = self.run_actor("choose_pick_obj")
@@ -183,7 +189,7 @@ class Tools(SubNet):
 
         cod = link_info.pose[index].position
         return (cod.x, cod.y)
-    
+
     @actor
     def get_end_effector(self):
         link_info = self.run_actor("link_states")
@@ -210,9 +216,9 @@ class Tools(SubNet):
         if match:
             link_name = match.group(1)
         return link_name
-        
-    @actor 
-    def get_modelpos_dict(self, debug:bool = False):
+
+    @actor
+    def get_modelpos_dict(self, debug: bool = False):
         pos_dict = {}
         model_info = self.run_actor("model_states")
         for i in range(len(model_info.name)):
@@ -223,8 +229,8 @@ class Tools(SubNet):
                 cod = model_info.pose[i].position
                 pos_dict[model_info.name[i]] = (cod.x, cod.y)
         return pos_dict
-    
-    @actor 
+
+    @actor
     def get_linkpos_dict(self):
         pos_dict = {}
         link_info = self.run_actor("link_states")
@@ -235,13 +241,15 @@ class Tools(SubNet):
 
     @actor
     # def get_near_obj(self, debug:bool =False):
-    def choose_pick_obj(self, debug:bool =False):
+    def choose_pick_obj(self, debug: bool = False):
         gripper = self.run_actor("get_link7")
         model_dict = self.run_actor("get_modelpos_dict")
         name_list = []
 
         for objname in model_dict:
-            dist = hypot(gripper[0]-model_dict[objname][0], gripper[1]-model_dict[objname][1])
+            dist = hypot(
+                gripper[0] - model_dict[objname][0], gripper[1] - model_dict[objname][1]
+            )
             if debug:
                 print(f"{objname}: {dist}")
 
@@ -253,8 +261,7 @@ class Tools(SubNet):
         #     return False
         # return name_list
 
-
-    # @actor 
+    # @actor
     # def choose_pick_obj(self):
     #     name_list = self.run_actor("get_near_obj")
     #     r_x, r_y, l_x, l_y = self.run_actor("get_end_effector")
@@ -262,7 +269,7 @@ class Tools(SubNet):
 
     #     if not name_list:
     #         return False
-        
+
     #     for n in name_list:
     #         print(model_dict[n])
 
@@ -274,7 +281,8 @@ class Tools(SubNet):
         dir_path = "/root/practice_ws/trees"
         org_path = "/root/pytwb_ws/src/cm1/cm1/trees"
         for d in os.listdir(dir_path):
-            if not d.endswith('.xml'): continue
+            if not d.endswith(".xml"):
+                continue
             if d not in os.listdir(org_path):
                 cmd = f"""ln -s /root/practice_ws/trees/{d} /root/pytwb_ws/src/cm1/cm1/trees/{d}"""
                 subprocess.run(cmd, shell=True)

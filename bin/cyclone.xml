@@ -7,6 +7,7 @@
     </General>
     <Discovery>
       <ParticipantIndex>auto</ParticipantIndex>
+        <MaxAutoParticipantIndex>100</MaxAutoParticipantIndex>
       <Peers>
         <Peer Address="192.168.10.146"/>
         <Peer Address="localhost"/>
@@ -19,6 +20,7 @@
 	<Peer Address="192.168.75.25"/>
 	<Peer Address="192.168.128.217"/>
 	<Peer Address="192.168.128.229"/>
+	<Peer Address="192.168.11.101"/>
       </Peers>
     </Discovery>
   </Domain>
