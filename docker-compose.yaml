@@ -1,3 +1,9 @@
+# Intel・CPU環境:
+#   docker compose up
+# NVIDIA環境（WhisperでCUDAを使う場合）:
+#   docker compose -f docker-compose.yaml -f docker-compose.nvidia.yaml up
+# AMD Radeon環境（Gazebo描画にDRIが必要な場合）:
+#   docker compose -f docker-compose.yaml -f docker-compose.radeon.yaml up
 services:
   lime_simul_demo_yuu:
     image: course_lime-image_yuu
@@ -11,14 +17,23 @@ services:
     privileged: true
     environment:
       - DISPLAY=${DISPLAY}
+      - XAUTHORITY=/root/.Xauthority
+      - PULSE_SERVER=unix:${XDG_RUNTIME_DIR}/pulse/native
+      - PULSE_COOKIE=/root/.config/pulse/cookie
+      - XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}
+    devices:
+      - /dev/snd:/dev/snd
+    group_add:
+      - audio
     volumes:
       - ./pytwb_ws:/root/pytwb_ws:rw
       - ./bin:/root/bin:rw
       - ./roscommon:/root/roscommon:rw
-      - $HOME/.Xauthority:/root/.Xauthority
+      - ${XAUTHORITY:-${HOME}/.Xauthority}:/root/.Xauthority:ro
+      - ${XDG_RUNTIME_DIR}/pulse:${XDG_RUNTIME_DIR}/pulse:ro
+      - ${HOME}/.config/pulse:/root/.config/pulse:ro
       - ./practice_ws:/root/practice_ws:rw
-    command: xterm -fn 12X24 -display ${DISPLAY} -T 'cm main'
-
+    command: xterm -fn 12X24 -T 'cm main'
 
 #新しくYOLOのために内容追加
 

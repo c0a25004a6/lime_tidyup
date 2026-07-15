@@ -1,0 +1,8 @@
+<root>
+    <BehaviorTree ID="test_voice">
+    <Sequence name="main">
+        <VoiceCommand name="listen" />
+        <GoToPose name="go" />
+    </Sequence>
+    </BehaviorTree>
+</root>
