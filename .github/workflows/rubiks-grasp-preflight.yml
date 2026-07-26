@@ -78,12 +78,13 @@ jobs:
         run: |
           python3 - <<'PY'
           import json
+          import os
           from pathlib import Path
 
           report = json.loads(Path('artifacts/plugin-report.json').read_text())
           required = report['plugins']['libgazebo_grasp_fix.so']
           link_attacher = report['plugins']['libgazebo_link_attacher.so']
-          with open(Path.cwd() / Path(os.environ['GITHUB_STEP_SUMMARY']), 'a') as summary:
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
               summary.write('## Built image plugin evidence\n\n')
               summary.write(f"- libgazebo_grasp_fix.so found: `{required['found']}`\n")
               summary.write(f"- libgazebo_link_attacher.so found: `{link_attacher['found']}`\n")
