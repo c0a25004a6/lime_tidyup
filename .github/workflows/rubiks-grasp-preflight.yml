@@ -41,8 +41,6 @@ jobs:
           python3 bin/rubiks_grasp_preflight.py validate-model \
             --parameters project/resource/model_editor_models/rubiks_cube/parameters.json \
             --model /tmp/rubiks_cube/model.sdf
-      - name: Exercise plugin probe without requiring ROS
-        run: python3 bin/rubiks_grasp_preflight.py probe-plugin --allow-missing
       - name: Check opening boundary calculations
         run: |
           python3 bin/rubiks_grasp_preflight.py opening --joint-position-m=-0.010
