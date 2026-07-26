@@ -68,6 +68,16 @@ The original Coke Can model is too heavy to pick as it is, so edit the model and
 ## Picking Operation
 The picking operation, which combines bt_search and bt_catch, can be executed by the 'bt_pick' Behavior Tree.
 
+## Rubik's Cube grasp preflight
+Before adding a Rubik-specific grasp trajectory, run the plugin, gripper-opening, and model-parameter checks documented in [Rubik's Cube grasp preflight](doc/rubiks_grasp_preflight.md).
+
+The preflight phase does not change existing robot behavior. Its dependency-free checks can be run with:
+
+```
+python3 bin/rubiks_grasp_preflight.py self-test
+python3 bin/rubiks_grasp_preflight.py validate-model
+```
+
 ## Internal structure
 ros_actor is heavily used to implement each Behavior Tree. As the main thing,
 - Nav2 operation,
