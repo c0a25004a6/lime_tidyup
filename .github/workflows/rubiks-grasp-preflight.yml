@@ -41,7 +41,57 @@ jobs:
           python3 bin/rubiks_grasp_preflight.py validate-model \
             --parameters project/resource/model_editor_models/rubiks_cube/parameters.json \
             --model /tmp/rubiks_cube/model.sdf
+      - name: Exercise plugin probe without requiring ROS
+        run: python3 bin/rubiks_grasp_preflight.py probe-plugin --allow-missing
       - name: Check opening boundary calculations
         run: |
           python3 bin/rubiks_grasp_preflight.py opening --joint-position-m=-0.010
           python3 bin/rubiks_grasp_preflight.py opening --joint-position-m=0.019
+
+  built-image-evidence:
+    if: github.event_name == 'pull_request'
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the current Lime simulation image
+        run: docker build --progress=plain -t lime-tidyup-rubiks-preflight .
+      - name: Probe the completed image
+        run: |
+          mkdir -p artifacts
+          docker run --rm \
+            -v "$PWD/artifacts:/out" \
+            lime-tidyup-rubiks-preflight \
+            bash -lc '
+              source /opt/ros/humble/setup.bash
+              source /project/lib_ws/install/setup.bash
+              source /root/turtlebot3_ws/install/setup.bash
+              python3 /root/bin/rubiks_grasp_preflight.py probe-plugin \
+                --allow-missing \
+                --report /out/plugin-report.json
+              python3 /root/bin/rubiks_grasp_preflight.py validate-model \
+                --parameters /root/.gazebo/models/rubiks_cube/parameters.json \
+                --model /root/.gazebo/models/rubiks_cube/model.sdf
+            '
+      - name: Summarize plugin evidence
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          report = json.loads(Path('artifacts/plugin-report.json').read_text())
+          required = report['plugins']['libgazebo_grasp_fix.so']
+          link_attacher = report['plugins']['libgazebo_link_attacher.so']
+          with open(Path.cwd() / Path(os.environ['GITHUB_STEP_SUMMARY']), 'a') as summary:
+              summary.write('## Built image plugin evidence\n\n')
+              summary.write(f"- libgazebo_grasp_fix.so found: `{required['found']}`\n")
+              summary.write(f"- libgazebo_link_attacher.so found: `{link_attacher['found']}`\n")
+              summary.write(f"- GAZEBO_PLUGIN_PATH: `{report['gazebo_plugin_path']}`\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rubiks-grasp-built-image-evidence
+          path: artifacts/
+          if-no-files-found: warn
