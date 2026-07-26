@@ -1,0 +1,47 @@
+name: Rubik grasp preflight
+
+on:
+  push:
+    paths:
+      - "bin/rubiks_grasp_preflight.py"
+      - "project/resource/model_editor_models/rubiks_cube/**"
+      - "doc/rubiks_grasp_preflight.md"
+      - ".github/workflows/rubiks-grasp-preflight.yml"
+  pull_request:
+    paths:
+      - "bin/rubiks_grasp_preflight.py"
+      - "project/resource/model_editor_models/rubiks_cube/**"
+      - "doc/rubiks_grasp_preflight.md"
+      - ".github/workflows/rubiks-grasp-preflight.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Compile tool
+        run: python3 -m py_compile bin/rubiks_grasp_preflight.py
+      - name: Run dependency-free self-test
+        run: python3 bin/rubiks_grasp_preflight.py self-test
+      - name: Validate checked-in model
+        run: python3 bin/rubiks_grasp_preflight.py validate-model
+      - name: Regenerate and validate model in a temporary directory
+        run: |
+          mkdir -p /tmp/rubiks_cube
+          python3 bin/rubiks_grasp_preflight.py generate-model \
+            --parameters project/resource/model_editor_models/rubiks_cube/parameters.json \
+            --output /tmp/rubiks_cube/model.sdf
+          python3 bin/rubiks_grasp_preflight.py validate-model \
+            --parameters project/resource/model_editor_models/rubiks_cube/parameters.json \
+            --model /tmp/rubiks_cube/model.sdf
+      - name: Check opening boundary calculations
+        run: |
+          python3 bin/rubiks_grasp_preflight.py opening --joint-position-m=-0.010
+          python3 bin/rubiks_grasp_preflight.py opening --joint-position-m=0.019
