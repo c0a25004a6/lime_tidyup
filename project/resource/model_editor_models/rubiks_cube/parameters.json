@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "model": {
+    "name": "rubiks_cube",
+    "edge_length_m": 0.057,
+    "mass_kg": 0.09,
+    "tile_gap_m": 0.001,
+    "tile_thickness_m": 0.0005,
+    "restitution_coefficient": 0.0,
+    "friction": {
+      "mu": 1.0,
+      "mu2": 1.0
+    }
+  },
+  "gripper": {
+    "kinematic_source": "ROBOTIS-JAPAN-GIT/turtlebot3_lime humble-devel open_manipulator_sara.urdf.xacro",
+    "left_joint": {
+      "name": "gripper_left_joint",
+      "origin_y_m": 0.021,
+      "axis_y": 1.0,
+      "lower_m": -0.01,
+      "upper_m": 0.019
+    },
+    "right_joint": {
+      "name": "gripper_right_joint",
+      "origin_y_m": -0.021,
+      "axis_y": -1.0,
+      "lower_m": -0.01,
+      "upper_m": 0.019
+    },
+    "inner_face_offset_from_link_frame_m": null,
+    "calibration_status": "unmeasured"
+  },
+  "plugin_policy": {
+    "required_contact_assist_plugin": "libgazebo_grasp_fix.so",
+    "transport_only_alternative": "libgazebo_link_attacher.so",
+    "link_attacher_must_not_count_as_physics_grasp_success": true
+  }
+}
