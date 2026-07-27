@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Command the Lime gripper open-close-open and record joint-state telemetry."""
+"""Command the Lime gripper open-close-open and record joint and Gazebo telemetry."""
 from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 import time
 
@@ -11,7 +12,7 @@ import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from control_msgs.action import GripperCommand
-from gazebo_msgs.msg import ModelStates
+from gazebo_msgs.msg import LinkStates, ModelStates
 from sensor_msgs.msg import JointState
 
 
@@ -22,22 +23,30 @@ class SmokeNode(Node):
         left_joint: str,
         right_joint: str,
         model_name: str | None,
+        left_link: str | None,
+        right_link: str | None,
     ) -> None:
         super().__init__("rubiks_gripper_command_smoke")
         self.client = ActionClient(self, GripperCommand, action_name)
         self.left_joint = left_joint
         self.right_joint = right_joint
         self.model_name = model_name
+        self.left_link = left_link
+        self.right_link = right_link
         self.started = time.monotonic()
         self.samples: list[dict] = []
         self.model_state_samples: list[dict] = []
-        self.latest: dict[str, float | bool] = {}
+        self.link_state_samples: list[dict] = []
+        self.latest: dict[str, float | bool | None] = {}
         self.latest_model_state: dict | None = None
+        self.latest_link_state: dict | None = None
         self.phase = "initial"
         self.command_target_m: float | None = None
         self.create_subscription(JointState, "/joint_states", self.on_joint_state, 50)
         if model_name:
             self.create_subscription(ModelStates, "/model_states", self.on_model_states, 20)
+        if left_link and right_link:
+            self.create_subscription(LinkStates, "/link_states", self.on_link_states, 20)
 
     def on_joint_state(self, msg: JointState) -> None:
         values = dict(zip(msg.name, msg.position))
@@ -46,13 +55,23 @@ class SmokeNode(Node):
         left = float(values[self.left_joint])
         right_value = values.get(self.right_joint)
         right_observed = right_value is not None
-        right = float(right_value) if right_observed else left
+        right = float(right_value) if right_observed else None
+        joint_separation = (
+            abs((0.021 + left) - (-0.021 - right)) if right is not None else None
+        )
+        physical_separation = (
+            float(self.latest_link_state["separation_m"])
+            if self.latest_link_state is not None
+            else None
+        )
+        evidence_separation = (
+            joint_separation if joint_separation is not None else physical_separation
+        )
         self.latest = {
             "left": left,
             "right": right,
             "right_observed": right_observed,
         }
-        separation = abs((0.021 + left) - (-0.021 - right))
         self.samples.append({
             "t_s": time.monotonic() - self.started,
             "phase": self.phase,
@@ -60,7 +79,13 @@ class SmokeNode(Node):
             "left_joint_position_m": left,
             "right_joint_position_m": right,
             "right_joint_observed": right_observed,
-            "link_frame_separation_m": separation,
+            "joint_derived_link_frame_separation_m": joint_separation,
+            "gazebo_link_frame_separation_m": physical_separation,
+            "link_frame_separation_m": evidence_separation,
+            "link_frame_separation_source": (
+                "joint_states" if joint_separation is not None else
+                "gazebo_link_states" if physical_separation is not None else None
+            ),
             "inner_face_opening_m": None,
         })
 
@@ -77,10 +102,8 @@ class SmokeNode(Node):
             "t_s": time.monotonic() - self.started,
             "position_m": [float(pose.position.x), float(pose.position.y), float(pose.position.z)],
             "orientation_xyzw": [
-                float(pose.orientation.x),
-                float(pose.orientation.y),
-                float(pose.orientation.z),
-                float(pose.orientation.w),
+                float(pose.orientation.x), float(pose.orientation.y),
+                float(pose.orientation.z), float(pose.orientation.w),
             ],
             "linear_velocity_m_s": [
                 float(twist.linear.x), float(twist.linear.y), float(twist.linear.z)
@@ -91,6 +114,33 @@ class SmokeNode(Node):
         }
         self.latest_model_state = sample
         self.model_state_samples.append(sample)
+
+    def on_link_states(self, msg: LinkStates) -> None:
+        if not self.left_link or not self.right_link:
+            return
+        try:
+            left_index = msg.name.index(self.left_link)
+            right_index = msg.name.index(self.right_link)
+        except ValueError:
+            return
+        left_pose = msg.pose[left_index]
+        right_pose = msg.pose[right_index]
+        left_position = [
+            float(left_pose.position.x), float(left_pose.position.y), float(left_pose.position.z)
+        ]
+        right_position = [
+            float(right_pose.position.x), float(right_pose.position.y), float(right_pose.position.z)
+        ]
+        sample = {
+            "t_s": time.monotonic() - self.started,
+            "left_link": self.left_link,
+            "right_link": self.right_link,
+            "left_position_m": left_position,
+            "right_position_m": right_position,
+            "separation_m": math.dist(left_position, right_position),
+        }
+        self.latest_link_state = sample
+        self.link_state_samples.append(sample)
 
     def spin_for(self, seconds: float) -> None:
         deadline = time.monotonic() + seconds
@@ -144,22 +194,38 @@ def main() -> int:
     parser.add_argument("--trial-type", default="fake_hardware_gripper_command_smoke")
     parser.add_argument("--hardware-backend", default="generic_system_fake_hardware")
     parser.add_argument("--model-name")
+    parser.add_argument("--left-link")
+    parser.add_argument("--right-link")
+    parser.add_argument(
+        "--require-right-joint", action=argparse.BooleanOptionalAction, default=True
+    )
     args = parser.parse_args()
 
+    if bool(args.left_link) != bool(args.right_link):
+        parser.error("--left-link and --right-link must be supplied together")
+
     rclpy.init(args=None)
-    node = SmokeNode(args.action, args.left_joint, args.right_joint, args.model_name)
+    node = SmokeNode(
+        args.action, args.left_joint, args.right_joint,
+        args.model_name, args.left_link, args.right_link,
+    )
     events: list[dict] = []
     initial_model_state: dict | None = None
+    initial_link_state: dict | None = None
     try:
         node.spin_for(1.0)
         if not node.latest:
-            raise RuntimeError("gripper joint was not observed on /joint_states")
-        if not bool(node.latest.get("right_observed")):
+            raise RuntimeError("gripper left joint was not observed on /joint_states")
+        if args.require_right_joint and not bool(node.latest.get("right_observed")):
             raise RuntimeError("right mimic joint was not observed on /joint_states")
         if args.model_name:
             if node.latest_model_state is None:
                 raise RuntimeError(f"model {args.model_name!r} was not observed on /model_states")
             initial_model_state = dict(node.latest_model_state)
+        if args.left_link and args.right_link:
+            if node.latest_link_state is None:
+                raise RuntimeError("gripper links were not observed on /link_states")
+            initial_link_state = dict(node.latest_link_state)
         for label, target in (("open_1", 0.019), ("close", -0.010), ("open_2", 0.019)):
             command_t = time.monotonic() - node.started
             outcome = node.send(label, target, max_effort=1.0, timeout=args.timeout)
@@ -170,6 +236,18 @@ def main() -> int:
                 "observed_left_joint_position_m": node.latest.get("left"),
                 "observed_right_joint_position_m": node.latest.get("right"),
                 "right_joint_observed": bool(node.latest.get("right_observed")),
+                "gazebo_link_frame_separation_m": (
+                    node.latest_link_state.get("separation_m")
+                    if node.latest_link_state is not None else None
+                ),
+                "gazebo_left_link_position_m": (
+                    node.latest_link_state.get("left_position_m")
+                    if node.latest_link_state is not None else None
+                ),
+                "gazebo_right_link_position_m": (
+                    node.latest_link_state.get("right_position_m")
+                    if node.latest_link_state is not None else None
+                ),
             })
             events.append(outcome)
         node.phase = "complete"
@@ -182,18 +260,26 @@ def main() -> int:
     if len(node.samples) < 10:
         raise RuntimeError(f"insufficient joint-state samples: {len(node.samples)}")
     payload = {
-        "schema_version": 2,
+        "schema_version": 3,
         "trial_type": args.trial_type,
         "hardware_backend": args.hardware_backend,
         "action_name": args.action,
         "left_joint": args.left_joint,
         "right_joint": args.right_joint,
+        "right_joint_required": args.require_right_joint,
         "model_name": args.model_name,
+        "left_link": args.left_link,
+        "right_link": args.right_link,
         "model_state_observed": bool(node.model_state_samples),
         "initial_model_state": initial_model_state,
         "final_model_state": node.latest_model_state,
         "model_state_sample_count": len(node.model_state_samples),
         "model_state_samples": node.model_state_samples,
+        "link_states_observed": bool(node.link_state_samples),
+        "initial_link_state": initial_link_state,
+        "final_link_state": node.latest_link_state,
+        "link_state_sample_count": len(node.link_state_samples),
+        "link_state_samples": node.link_state_samples,
         "inner_face_opening_calibrated": False,
         "cube_contact": False,
         "grasp_success_claimed": False,
@@ -204,7 +290,10 @@ def main() -> int:
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps({k: v for k, v in payload.items() if k not in {"samples", "model_state_samples"}}, indent=2))
+    print(json.dumps({
+        k: v for k, v in payload.items()
+        if k not in {"samples", "model_state_samples", "link_state_samples"}
+    }, indent=2))
     return 0
 
 
