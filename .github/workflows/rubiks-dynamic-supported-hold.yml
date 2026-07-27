@@ -1,0 +1,169 @@
+name: Rubik dynamic supported hold evidence
+
+on:
+  push:
+    paths:
+      - "bin/run_rubiks_dynamic_supported_hold.py"
+      - "bin/run_gazebo_dynamic_supported_hold"
+      - "project/resource/rubiks_dynamic_cube_supported_057.sdf"
+      - "project/resource/rubiks_cube_support_surface.sdf"
+      - "project/resource/turtlebot3_lime_gripper_test.urdf.xacro"
+      - "project/resource/gazebo_gripper_test_controller_manager.yaml"
+      - "project/resource/rubiks_grasp_calibration.world"
+      - "doc/rubiks_dynamic_supported_hold.md"
+      - ".github/workflows/rubiks-dynamic-supported-hold.yml"
+  pull_request:
+    paths:
+      - "bin/run_rubiks_dynamic_supported_hold.py"
+      - "bin/run_gazebo_dynamic_supported_hold"
+      - "project/resource/rubiks_dynamic_cube_supported_057.sdf"
+      - "project/resource/rubiks_cube_support_surface.sdf"
+      - "project/resource/turtlebot3_lime_gripper_test.urdf.xacro"
+      - "project/resource/gazebo_gripper_test_controller_manager.yaml"
+      - "project/resource/rubiks_grasp_calibration.world"
+      - "doc/rubiks_dynamic_supported_hold.md"
+      - ".github/workflows/rubiks-dynamic-supported-hold.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rubiks-dynamic-supported-hold-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dynamic-supported-hold-evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate dynamic hold harness
+        run: |
+          python3 -m py_compile \
+            bin/run_rubiks_dynamic_supported_hold.py
+          bash -n bin/run_gazebo_dynamic_supported_hold
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          for path in (
+              'project/resource/rubiks_dynamic_cube_supported_057.sdf',
+              'project/resource/rubiks_cube_support_surface.sdf',
+              'project/resource/turtlebot3_lime_gripper_test.urdf.xacro',
+              'project/resource/rubiks_grasp_calibration.world',
+          ):
+              ET.parse(path)
+          PY
+          grep -q '<static>false</static>' project/resource/rubiks_dynamic_cube_supported_057.sdf
+          grep -q '<mass>0.09</mass>' project/resource/rubiks_dynamic_cube_supported_057.sdf
+          grep -q '<ixx>4.8735e-05</ixx>' project/resource/rubiks_dynamic_cube_supported_057.sdf
+          grep -q '<size>0.057 0.057 0.057</size>' project/resource/rubiks_dynamic_cube_supported_057.sdf
+          grep -q 'libgazebo_ros_bumper.so' project/resource/rubiks_dynamic_cube_supported_057.sdf
+          grep -q '<static>true</static>' project/resource/rubiks_cube_support_surface.sdf
+          grep -q '<size>0.075 0.040 0.010</size>' project/resource/rubiks_cube_support_surface.sdf
+          ! grep -q 'libgazebo_grasp_fix.so' project/resource/turtlebot3_lime_gripper_test.urdf.xacro
+
+      - name: Install video encoder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Build current Lime simulation image
+        run: docker build -t lime-tidyup-dynamic-supported-hold:${{ github.sha }} .
+
+      - name: Run dynamic supported close-hold-release trial
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          cp project/resource/rubiks_dynamic_cube_supported_057.sdf artifacts/
+          cp project/resource/rubiks_cube_support_surface.sdf artifacts/
+          docker run --rm --network host \
+            -v "$PWD/artifacts:/artifacts" \
+            lime-tidyup-dynamic-supported-hold:${{ github.sha }} \
+            bash -lc 'bash /root/bin/run_gazebo_dynamic_supported_hold /artifacts' \
+            >artifacts/container.stdout.log 2>artifacts/container.stderr.log
+
+      - name: Validate dynamic supported hold evidence
+        run: |
+          test -s artifacts/turtlebot3_lime_gripper_test.urdf
+          test -s artifacts/rubiks_dynamic_cube_supported_057.sdf
+          test -s artifacts/rubiks_cube_support_surface.sdf
+          test -s artifacts/rubiks_dynamic_supported_hold_telemetry.json
+          test -s artifacts/rubiks_dynamic_supported_hold_summary.json
+          test -s artifacts/rubiks_dynamic_supported_hold_normal_audit.json
+          test -s artifacts/rubiks_dynamic_supported_hold_evidence.manifest.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          summary = json.loads(Path('artifacts/rubiks_dynamic_supported_hold_summary.json').read_text())
+          audit = json.loads(Path('artifacts/rubiks_dynamic_supported_hold_normal_audit.json').read_text())
+          if summary.get('passed') is not True:
+              raise SystemExit(summary.get('errors'))
+          if audit.get('passed') is not True:
+              raise SystemExit(audit.get('errors'))
+          if summary.get('cube_dynamic') is not True:
+              raise SystemExit('dynamic cube evidence was not recorded')
+          if abs(float(summary.get('cube_mass_kg', 0.0)) - 0.09) > 1e-12:
+              raise SystemExit('cube mass differs from canonical 90 g')
+          if summary.get('support_contact_before_close') is not True:
+              raise SystemExit('cube did not settle onto support before closing')
+          if summary.get('initial_open_finger_contact') is not False:
+              raise SystemExit('cube intersected a finger while fully open')
+          for key in (
+              'left_cube_contact_observed',
+              'right_cube_contact_observed',
+              'dual_cube_contact_observed',
+              'contact_cleared_after_reopen',
+          ):
+              if summary.get(key) is not True:
+                  raise SystemExit(f'{key} must be true')
+          hold = summary['hold_result']
+          if float(hold['support_contact_ratio']) < 0.75:
+              raise SystemExit('support contact was not maintained during hold')
+          if float(hold['bilateral_finger_contact_ratio']) < 0.65:
+              raise SystemExit('bilateral finger contact was not maintained during hold')
+          if float(hold['movement']['max_vertical_rise_m']) > 0.0015:
+              raise SystemExit('cube rose from its support during the no-lift gate')
+          release = summary['release_result']
+          if float(release['support_contact_ratio']) < 0.75:
+              raise SystemExit('support contact was not restored after release')
+          for key in (
+              'arm_motion_performed', 'lift_command_sent', 'cube_lifted',
+              'ifra_attachment_used', 'grasp_success_claimed',
+          ):
+              if summary.get(key) is not False:
+                  raise SystemExit(f'{key} must remain false')
+          print(json.dumps({'summary': summary, 'normal_audit': audit}, indent=2))
+          PY
+
+      - name: Render dynamic supported-hold telemetry video
+        run: |
+          python3 bin/render_rubiks_cube_contact_video.py \
+            --telemetry artifacts/rubiks_dynamic_supported_hold_telemetry.json \
+            --output artifacts/rubiks_dynamic_supported_hold_telemetry_evidence.mp4
+          ffprobe -v error -show_entries format=duration,size \
+            -of json artifacts/rubiks_dynamic_supported_hold_telemetry_evidence.mp4 \
+            >artifacts/rubiks_dynamic_supported_hold_telemetry_evidence.ffprobe.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          probe = json.loads(Path('artifacts/rubiks_dynamic_supported_hold_telemetry_evidence.ffprobe.json').read_text())
+          duration = float(probe['format']['duration'])
+          size = int(probe['format']['size'])
+          if duration < 7.0:
+              raise SystemExit(f'video too short: {duration}')
+          if size < 10000:
+              raise SystemExit(f'video unexpectedly small: {size}')
+          print(f'video duration={duration:.3f}s size={size}')
+          PY
+
+      - name: Upload dynamic supported-hold evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-dynamic-supported-hold-evidence
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
