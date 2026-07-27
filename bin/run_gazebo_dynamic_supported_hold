@@ -1,0 +1,454 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+ARTIFACT_DIR="${1:-/artifacts}"
+mkdir -p "${ARTIFACT_DIR}"
+
+source /opt/ros/humble/setup.bash
+source /project/lib_ws/install/setup.bash
+source /root/turtlebot3_ws/install/setup.bash
+set -u
+
+export GAZEBO_MODEL_PATH="${GAZEBO_MODEL_PATH:-}:/root/.gazebo/models:/opt/ros/humble/share/turtlebot3_gazebo/models"
+export GAZEBO_PLUGIN_PATH="${GAZEBO_PLUGIN_PATH:-}:/project/lib_ws/install/IFRA_LinkAttacher/lib:/opt/ros/humble/lib"
+
+MODEL_NAME="turtlebot3_lime_gripper_test"
+URDF_PATH="${ARTIFACT_DIR}/turtlebot3_lime_gripper_test.urdf"
+SERVER_LOG="${ARTIFACT_DIR}/rubiks_dynamic_supported_hold.gzserver.log"
+RSP_LOG="${ARTIFACT_DIR}/rubiks_dynamic_supported_hold.robot_state_publisher.log"
+TELEMETRY="${ARTIFACT_DIR}/rubiks_dynamic_supported_hold_telemetry.json"
+
+cleanup() {
+  status=$?
+  for pid in "${GZSERVER_PID:-}" "${RSP_PID:-}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+      kill -INT "${pid}" 2>/dev/null || true
+    fi
+  done
+  sleep 2
+  for pid in "${GZSERVER_PID:-}" "${RSP_PID:-}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+      kill -TERM "${pid}" 2>/dev/null || true
+      wait "${pid}" 2>/dev/null || true
+    fi
+  done
+  exit "${status}"
+}
+trap cleanup EXIT INT TERM
+
+ros2_service_available() {
+  local service_type
+  service_type="$(timeout 5 ros2 service type "$1" 2>/dev/null)" || return 1
+  [[ -n "${service_type}" ]]
+}
+
+ros2_action_available() {
+  local output
+  local padded
+  output="$(timeout 5 ros2 action list 2>/dev/null)" || return 1
+  padded=$'\n'"${output}"$'\n'
+  [[ "${padded}" == *$'\n'"$1"$'\n'* ]]
+}
+
+BUMPER_PLUGIN="$(find /opt/ros/humble/lib -name libgazebo_ros_bumper.so -print -quit)"
+test -n "${BUMPER_PLUGIN}"
+printf '%s\n' "${BUMPER_PLUGIN}" >"${ARTIFACT_DIR}/rubiks_dynamic_supported_hold.bumper_plugin.txt"
+
+xacro /project/resource/turtlebot3_lime_gripper_test.urdf.xacro >"${URDF_PATH}"
+grep -q 'libgazebo_ros2_control.so' "${URDF_PATH}"
+! grep -q 'libgazebo_grasp_fix.so' "${URDF_PATH}"
+! grep -q 'librealsense_gazebo_plugin.so' "${URDF_PATH}"
+! grep -q 'libgazebo_ros_diff_drive.so' "${URDF_PATH}"
+! grep -q 'libgazebo_ros_ray_sensor.so' "${URDF_PATH}"
+
+ros2 run robot_state_publisher robot_state_publisher "${URDF_PATH}" \
+  --ros-args -p use_sim_time:=true \
+  >"${RSP_LOG}" 2>&1 &
+RSP_PID=$!
+sleep 2
+if ! kill -0 "${RSP_PID}" 2>/dev/null; then
+  cat "${RSP_LOG}"
+  exit 2
+fi
+
+gzserver /project/resource/rubiks_grasp_calibration.world \
+  -s libgazebo_ros_init.so \
+  -s libgazebo_ros_factory.so \
+  >"${SERVER_LOG}" 2>&1 &
+GZSERVER_PID=$!
+
+for _ in $(seq 1 90); do
+  if ros2_service_available '/spawn_entity'; then
+    break
+  fi
+  kill -0 "${GZSERVER_PID}" 2>/dev/null || { cat "${SERVER_LOG}"; exit 3; }
+  sleep 1
+done
+if ! ros2_service_available '/spawn_entity'; then
+  ros2 service list >"${ARTIFACT_DIR}/rubiks_dynamic_supported_hold.services_spawn_failure.txt" 2>&1 || true
+  cat "${SERVER_LOG}"
+  exit 3
+fi
+
+ros2 run gazebo_ros spawn_entity.py \
+  -entity "${MODEL_NAME}" \
+  -file "${URDF_PATH}" \
+  -x 0.0 -y 0.0 -z 0.03 -Y 0.0 \
+  >"${ARTIFACT_DIR}/rubiks_dynamic_supported_hold.robot_spawn.log" 2>&1
+
+for _ in $(seq 1 90); do
+  if ros2_service_available '/controller_manager/list_controllers'; then
+    break
+  fi
+  kill -0 "${GZSERVER_PID}" 2>/dev/null || { cat "${SERVER_LOG}"; exit 4; }
+  sleep 1
+done
+if ! ros2_service_available '/controller_manager/list_controllers'; then
+  ros2 service list >"${ARTIFACT_DIR}/rubiks_dynamic_supported_hold.services_controller_failure.txt" 2>&1 || true
+  cat "${SERVER_LOG}"
+  exit 4
+fi
+
+ros2 run controller_manager spawner joint_state_broadcaster \
+  --controller-manager /controller_manager \
+  >"${ARTIFACT_DIR}/dynamic_hold_joint_state_broadcaster.spawner.log" 2>&1
+ros2 run controller_manager spawner gripper_controller \
+  --controller-manager /controller_manager \
+  >"${ARTIFACT_DIR}/dynamic_hold_gripper_controller.spawner.log" 2>&1
+
+for _ in $(seq 1 60); do
+  if ros2_action_available '/gripper_controller/gripper_cmd'; then
+    break
+  fi
+  sleep 1
+done
+if ! ros2_action_available '/gripper_controller/gripper_cmd'; then
+  ros2 action list >"${ARTIFACT_DIR}/rubiks_dynamic_supported_hold.actions_failure.txt" 2>&1 || true
+  exit 5
+fi
+
+sleep 3
+ros2 topic list >"${ARTIFACT_DIR}/rubiks_dynamic_supported_hold.topics_before.txt"
+gz topic -l >"${ARTIFACT_DIR}/rubiks_dynamic_supported_hold.gz_topics_before.txt" 2>&1 || true
+ros2 control list_hardware_interfaces \
+  >"${ARTIFACT_DIR}/rubiks_dynamic_supported_hold.hardware_interfaces.txt" 2>&1 || true
+
+set +e
+python3 /root/bin/run_rubiks_dynamic_supported_hold.py \
+  --cube-sdf /project/resource/rubiks_dynamic_cube_supported_057.sdf \
+  --support-sdf /project/resource/rubiks_cube_support_surface.sdf \
+  --cube-width 0.057 \
+  --cube-mass 0.09 \
+  --combined-inner-face-offset 0.003000000004097683 \
+  --calibration-uncertainty 0.0003279557798182653 \
+  --reference-frame "${MODEL_NAME}::link7" \
+  --cube-x -0.019 \
+  --cube-y 0.0 \
+  --cube-z 0.1192 \
+  --support-x -0.019 \
+  --support-y 0.0 \
+  --support-z 0.0857 \
+  --settle-seconds 2.0 \
+  --hold-seconds 2.0 \
+  --release-settle-seconds 1.5 \
+  --close-start 0.0185 \
+  --close-stop 0.0060 \
+  --close-step 0.00025 \
+  --step-hold 0.12 \
+  --max-effort 0.25 \
+  --timeout 8.0 \
+  --output "${TELEMETRY}" \
+  >"${ARTIFACT_DIR}/rubiks_dynamic_supported_hold.stdout.json" \
+  2>"${ARTIFACT_DIR}/rubiks_dynamic_supported_hold.stderr.log"
+TRIAL_STATUS=$?
+set -e
+
+ros2 topic list >"${ARTIFACT_DIR}/rubiks_dynamic_supported_hold.topics_after.txt" || true
+timeout 5 ros2 topic echo --once /rubiks_dynamic_cube_hold/contact_states \
+  >"${ARTIFACT_DIR}/rubiks_dynamic_supported_hold.contact_states_after.yaml" 2>&1 || true
+
+python3 - "${ARTIFACT_DIR}" "${TRIAL_STATUS}" <<'PY'
+from __future__ import annotations
+
+import bisect
+import json
+import math
+from pathlib import Path
+import statistics
+import sys
+
+root = Path(sys.argv[1])
+process_status = int(sys.argv[2])
+telemetry_path = root / "rubiks_dynamic_supported_hold_telemetry.json"
+if not telemetry_path.is_file():
+    raise SystemExit("dynamic supported-hold telemetry was not written")
+data = json.loads(telemetry_path.read_text(encoding="utf-8"))
+errors = [str(error) for error in data.get("errors", [])]
+if process_status != 0 and not errors:
+    errors.append(f"trial process exited with status {process_status}")
+
+if data.get("trial_type") != "gazebo_dynamic_supported_rubiks_cube_hold_release":
+    errors.append("unexpected trial_type")
+if data.get("hardware_backend") != "gazebo_ros2_control":
+    errors.append("unexpected hardware backend")
+if data.get("source_cube_collision_size_m") != [0.057, 0.057, 0.057]:
+    errors.append("cube collision is not exactly 57 mm on every axis")
+if not math.isclose(float(data.get("cube_mass_kg", -1)), 0.09, abs_tol=1e-12):
+    errors.append("cube mass is not 0.09 kg")
+for key in (
+    "cube_spawned",
+    "cube_dynamic",
+    "cube_mass_dynamics_tested",
+    "support_static",
+    "support_contact_before_close",
+    "left_cube_contact_observed",
+    "right_cube_contact_observed",
+    "dual_cube_contact_observed",
+    "contact_cleared_after_reopen",
+    "calibration_applied",
+):
+    if data.get(key) is not True:
+        errors.append(f"{key} must be true")
+if data.get("initial_open_finger_contact") is not False:
+    errors.append("cube contacted a finger while the gripper was fully open")
+if int(data.get("unexpected_robot_contact_count", -1)) != 0:
+    errors.append("cube contacted a non-finger robot collision")
+for key in (
+    "arm_motion_performed",
+    "lift_command_sent",
+    "cube_lifted",
+    "ifra_attachment_used",
+    "grasp_success_claimed",
+):
+    if data.get(key) is not False:
+        errors.append(f"{key} must remain false")
+
+contact = data.get("contact_result") or {}
+hold = data.get("hold_result") or {}
+release = data.get("release_result") or {}
+opening = contact.get("accepted_contact_inner_opening_m")
+opening_error = contact.get("opening_error_m")
+tolerance = contact.get("acceptance_tolerance_m")
+if opening is None or not 0.056 <= float(opening) <= 0.058:
+    errors.append(f"unexpected calibrated contact opening: {opening}")
+if opening_error is None or tolerance is None or abs(float(opening_error)) > float(tolerance):
+    errors.append(f"opening error exceeds tolerance: {opening_error} > {tolerance}")
+if int(contact.get("dual_contact_sample_count", 0)) < 10:
+    errors.append("insufficient bilateral contact samples")
+if float(contact.get("max_contact_depth_m", 1.0)) > 0.001:
+    errors.append("contact penetration exceeds 1 mm")
+
+if float(hold.get("observed_hold_seconds", 0.0)) < 1.9:
+    errors.append("bounded hold interval was too short")
+if float(hold.get("support_contact_ratio", 0.0)) < 0.75:
+    errors.append("support contact coverage during hold is too low")
+if float(hold.get("bilateral_finger_contact_ratio", 0.0)) < 0.65:
+    errors.append("bilateral finger contact coverage during hold is too low")
+movement = hold.get("movement") or {}
+if float(movement.get("max_horizontal_displacement_m", 1.0)) > 0.003:
+    errors.append("cube horizontal displacement during hold exceeds 3 mm")
+if float(movement.get("max_vertical_rise_m", 1.0)) > 0.0015:
+    errors.append("cube rose more than 1.5 mm from the support")
+if float(movement.get("max_rotation_rad", 1.0)) > 0.10:
+    errors.append("cube rotation during hold exceeds 0.10 rad")
+
+if float(release.get("observed_settle_seconds", 0.0)) < 1.4:
+    errors.append("post-release settle interval was too short")
+if float(release.get("support_contact_ratio", 0.0)) < 0.75:
+    errors.append("support contact coverage after release is too low")
+if float(release.get("final_cube_linear_speed_m_s", 1.0)) > 0.02:
+    errors.append("cube did not settle after release")
+final_offset = release.get("final_offset_from_preclose_settled_state") or {}
+if float(final_offset.get("horizontal_displacement_m", 1.0)) > 0.004:
+    errors.append("final cube horizontal offset exceeds 4 mm")
+if abs(float(final_offset.get("vertical_displacement_m", 1.0))) > 0.002:
+    errors.append("final cube vertical offset exceeds 2 mm")
+if float(final_offset.get("rotation_rad", 1.0)) > 0.12:
+    errors.append("final cube rotation exceeds 0.12 rad")
+
+samples = data.get("samples", [])
+finger_contacts = data.get("contact_messages", [])
+support_contacts = data.get("support_contact_messages", [])
+if len(samples) < 100:
+    errors.append(f"insufficient telemetry samples: {len(samples)}")
+if not finger_contacts:
+    errors.append("finger contact evidence is empty")
+if not support_contacts:
+    errors.append("support contact evidence is empty")
+if any(
+    sample.get("inner_face_opening_m") is None
+    for sample in samples
+    if sample.get("link_frame_separation_m") is not None
+):
+    errors.append("calibrated samples contain a missing inner-face opening")
+
+cube_states = data.get("cube_state_samples", [])
+left_normals = []
+right_normals = []
+left_relative_y = []
+right_relative_y = []
+dual_hold_messages = 0
+if cube_states:
+    cube_times = [float(state["t_s"]) for state in cube_states]
+
+    def nearest_cube_y(t_s):
+        index = bisect.bisect_left(cube_times, t_s)
+        if index <= 0:
+            state = cube_states[0]
+        elif index >= len(cube_states):
+            state = cube_states[-1]
+        else:
+            before = cube_states[index - 1]
+            after = cube_states[index]
+            state = min((before, after), key=lambda item: abs(float(item["t_s"]) - t_s))
+        return float(state["position_m"][1])
+
+    for message in finger_contacts:
+        if message.get("phase") != "cube_contact_hold" or not message.get("dual_contact"):
+            continue
+        dual_hold_messages += 1
+        cube_y = nearest_cube_y(float(message["t_s"]))
+        for state in message.get("states", []):
+            pair = f"{state.get('collision1', '')} {state.get('collision2', '')}"
+            normals = [[float(value) for value in normal] for normal in state.get("contact_normals", [])]
+            positions = [[float(value) for value in position] for position in state.get("contact_positions_m", [])]
+            relative_y = [position[1] - cube_y for position in positions]
+            if "gripper_left_link" in pair:
+                left_normals.extend(normals)
+                left_relative_y.extend(relative_y)
+            if "gripper_right_link" in pair:
+                right_normals.extend(normals)
+                right_relative_y.extend(relative_y)
+else:
+    errors.append("cube state evidence is empty")
+
+def side_metrics(normals, relative_y):
+    if not normals or not relative_y:
+        return {}
+    mean = [statistics.mean(float(normal[i]) for normal in normals) for i in range(3)]
+    mean_abs = [statistics.mean(abs(float(normal[i])) for normal in normals) for i in range(3)]
+    return {
+        "normal_count": len(normals),
+        "position_count": len(relative_y),
+        "mean_normal_xyz": mean,
+        "mean_abs_normal_xyz": mean_abs,
+        "mean_relative_contact_y_m": statistics.mean(relative_y),
+        "min_relative_contact_y_m": min(relative_y),
+        "max_relative_contact_y_m": max(relative_y),
+    }
+
+left_audit = side_metrics(left_normals, left_relative_y)
+right_audit = side_metrics(right_normals, right_relative_y)
+if dual_hold_messages < 10:
+    errors.append(f"insufficient dual-contact hold messages: {dual_hold_messages}")
+if not left_audit or not right_audit:
+    errors.append("bilateral side-normal evidence is incomplete")
+else:
+    for name, audit, expected_sign in (("left", left_audit, -1.0), ("right", right_audit, 1.0)):
+        mean = audit["mean_normal_xyz"]
+        mean_abs = audit["mean_abs_normal_xyz"]
+        if expected_sign * float(mean[1]) < 0.70:
+            errors.append(f"{name} Y normal has the wrong direction: {mean[1]}")
+        if float(mean_abs[1]) <= float(mean_abs[2]):
+            errors.append(f"{name} contact is not side-dominant: |Y|={mean_abs[1]} |Z|={mean_abs[2]}")
+        if float(mean_abs[1]) < 0.70:
+            errors.append(f"{name} lateral normal component is too small")
+        if float(mean_abs[2]) > 0.70:
+            errors.append(f"{name} vertical normal component is too large")
+        if float(mean_abs[0]) > 0.15:
+            errors.append(f"{name} depth-axis normal component is too large")
+    if not 0.026 <= float(left_audit["mean_relative_contact_y_m"]) <= 0.031:
+        errors.append(f"left contact is not on the moving cube +Y face: {left_audit['mean_relative_contact_y_m']}")
+    if not -0.031 <= float(right_audit["mean_relative_contact_y_m"]) <= -0.026:
+        errors.append(f"right contact is not on the moving cube -Y face: {right_audit['mean_relative_contact_y_m']}")
+
+normal_audit = {
+    "schema_version": 1,
+    "audit_type": "rubiks_dynamic_supported_hold_bilateral_side_normals",
+    "passed": not any(
+        text.startswith(("insufficient dual-contact", "bilateral side-normal", "left ", "right "))
+        for text in errors
+    ),
+    "dual_contact_hold_message_count": dual_hold_messages,
+    "left": left_audit,
+    "right": right_audit,
+    "position_reference": "nearest /model_states cube center",
+    "raw_gazebo_gui_video": False,
+}
+(root / "rubiks_dynamic_supported_hold_normal_audit.json").write_text(
+    json.dumps(normal_audit, indent=2) + "\n", encoding="utf-8"
+)
+
+summary = {
+    "schema_version": 1,
+    "trial_type": data.get("trial_type"),
+    "hardware_backend": data.get("hardware_backend"),
+    "passed": not errors,
+    "errors": errors,
+    "process_status": process_status,
+    "sample_count": len(samples),
+    "finger_contact_message_count": len(finger_contacts),
+    "support_contact_message_count": len(support_contacts),
+    "event_labels": [event.get("label") for event in data.get("events", [])],
+    "cube_width_m": data.get("cube_width_m"),
+    "cube_mass_kg": data.get("cube_mass_kg"),
+    "cube_dynamic": data.get("cube_dynamic"),
+    "support_static": data.get("support_static"),
+    "support_contact_before_close": data.get("support_contact_before_close"),
+    "initial_open_finger_contact": data.get("initial_open_finger_contact"),
+    "left_cube_contact_observed": data.get("left_cube_contact_observed"),
+    "right_cube_contact_observed": data.get("right_cube_contact_observed"),
+    "dual_cube_contact_observed": data.get("dual_cube_contact_observed"),
+    "contact_cleared_after_reopen": data.get("contact_cleared_after_reopen"),
+    "contact_result": contact,
+    "hold_result": hold,
+    "release_result": release,
+    "normal_audit": normal_audit,
+    "robot_base_displacement_m": data.get("robot_base_displacement_m"),
+    "robot_final_linear_speed_m_s": data.get("robot_final_linear_speed_m_s"),
+    "arm_motion_performed": False,
+    "lift_command_sent": False,
+    "cube_lifted": data.get("cube_lifted"),
+    "ifra_attachment_used": False,
+    "grasp_success_claimed": False,
+}
+(root / "rubiks_dynamic_supported_hold_summary.json").write_text(
+    json.dumps(summary, indent=2) + "\n", encoding="utf-8"
+)
+manifest = {
+    "schema_version": 1,
+    "evidence_type": "gazebo_dynamic_supported_rubiks_cube_hold_release",
+    "source": (
+        "canonical 57 mm / 90 g cube dynamics, explicit static support, Gazebo contact sensor, "
+        "gazebo_ros2_control, GripperCommand, /joint_states, /link_states, and /model_states"
+    ),
+    "calibration_source_pr": 5,
+    "static_side_contact_source_pr": 6,
+    "combined_inner_face_offset_m": data.get("combined_inner_face_offset_m"),
+    "calibration_uncertainty_m": data.get("calibration_uncertainty_m"),
+    "production_urdf_modified": False,
+    "cube_dynamic": True,
+    "support_static": True,
+    "arm_motion_performed": False,
+    "lift_command_sent": False,
+    "cube_lifted": False,
+    "ifra_attachment_used": False,
+    "grasp_success_claimed": False,
+    "review_required": True,
+    "files": {
+        "expanded_urdf": "turtlebot3_lime_gripper_test.urdf",
+        "cube_sdf": "rubiks_dynamic_cube_supported_057.sdf",
+        "support_sdf": "rubiks_cube_support_surface.sdf",
+        "telemetry": telemetry_path.name,
+        "summary": "rubiks_dynamic_supported_hold_summary.json",
+        "normal_audit": "rubiks_dynamic_supported_hold_normal_audit.json",
+        "video": "rubiks_dynamic_supported_hold_telemetry_evidence.mp4",
+    },
+}
+(root / "rubiks_dynamic_supported_hold_evidence.manifest.json").write_text(
+    json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+)
+print(json.dumps(summary, indent=2))
+if errors:
+    raise SystemExit("; ".join(errors))
+PY
