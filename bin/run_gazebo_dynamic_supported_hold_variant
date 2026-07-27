@@ -49,6 +49,22 @@ temp_shell.write_text(shell_text, encoding="utf-8")
 temp_shell.chmod(0o755)
 
 python_text = base_python.read_text(encoding="utf-8")
+old_initial = '''        node.spin_for(1.0)
+        if node.latest_joint is None or node.latest_link is None:
+            raise RuntimeError("initial gripper joint/link telemetry was not observed")
+        initial_robot_state = node.latest_robot_state
+'''
+new_initial = '''        node.wait_for(
+            lambda: node.latest_joint is not None and node.latest_link is not None,
+            5.0,
+            "initial gripper joint/link telemetry",
+        )
+        initial_robot_state = node.latest_robot_state
+'''
+if python_text.count(old_initial) != 1:
+    raise SystemExit("base dynamic hold runner no longer has the expected initial telemetry anchor")
+python_text = python_text.replace(old_initial, new_initial, 1)
+
 old_block = '''        target = args.close_start
         step_index = 0
         contact_event: dict | None = None
