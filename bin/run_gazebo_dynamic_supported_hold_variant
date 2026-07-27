@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ARTIFACT_DIR="${1:?artifact directory is required}"
+CUBE_Y="${2:?cube Y offset is required}"
+BASE_SCRIPT="/root/bin/run_gazebo_dynamic_supported_hold"
+TEMP_SCRIPT="$(mktemp /tmp/rubiks-supported-hold-variant.XXXXXX)"
+
+cleanup() {
+  rm -f "${TEMP_SCRIPT}"
+}
+trap cleanup EXIT
+
+python3 - "${BASE_SCRIPT}" "${TEMP_SCRIPT}" "${CUBE_Y}" <<'PY'
+from __future__ import annotations
+
+import math
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1])
+target = Path(sys.argv[2])
+cube_y = float(sys.argv[3])
+if not math.isfinite(cube_y):
+    raise SystemExit("cube Y offset must be finite")
+if abs(cube_y) > 0.001:
+    raise SystemExit(f"cube Y offset exceeds the repeatability safety bound: {cube_y}")
+text = source.read_text(encoding="utf-8")
+anchor = "  --cube-y 0.0 \\\n"
+if text.count(anchor) != 1:
+    raise SystemExit("base supported-hold harness no longer has the expected cube-y anchor")
+replacement = f"  --cube-y {cube_y:.6f} \\\n"
+target.write_text(text.replace(anchor, replacement, 1), encoding="utf-8")
+target.chmod(0o755)
+PY
+
+bash "${TEMP_SCRIPT}" "${ARTIFACT_DIR}"
