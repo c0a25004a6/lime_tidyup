@@ -15,15 +15,22 @@ export GAZEBO_PLUGIN_PATH="${GAZEBO_PLUGIN_PATH:-}:/project/lib_ws/install/IFRA_
 MODEL_NAME="turtlebot3_lime_gripper_test"
 URDF_PATH="${ARTIFACT_DIR}/turtlebot3_lime_gripper_test.urdf"
 SERVER_LOG="${ARTIFACT_DIR}/gazebo_gripper_command.gzserver.log"
+RSP_LOG="${ARTIFACT_DIR}/gazebo_gripper_command.robot_state_publisher.log"
 
 cleanup() {
   status=$?
-  if [[ -n "${GZSERVER_PID:-}" ]] && kill -0 "${GZSERVER_PID}" 2>/dev/null; then
-    kill -INT "${GZSERVER_PID}" 2>/dev/null || true
-    sleep 2
-    kill -TERM "${GZSERVER_PID}" 2>/dev/null || true
-    wait "${GZSERVER_PID}" 2>/dev/null || true
-  fi
+  for pid in "${GZSERVER_PID:-}" "${RSP_PID:-}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+      kill -INT "${pid}" 2>/dev/null || true
+    fi
+  done
+  sleep 2
+  for pid in "${GZSERVER_PID:-}" "${RSP_PID:-}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+      kill -TERM "${pid}" 2>/dev/null || true
+      wait "${pid}" 2>/dev/null || true
+    fi
+  done
   exit "${status}"
 }
 trap cleanup EXIT INT TERM
@@ -37,6 +44,24 @@ grep -q 'libgazebo_ros2_control.so' "${URDF_PATH}"
 ! grep -q 'libgazebo_ros_ray_sensor.so' "${URDF_PATH}"
 ! grep -q 'cameracolor\|cameradepth\|cameraired\|lds_lfcd_sensor' "${URDF_PATH}"
 
+# gazebo_ros2_control retrieves robot_description through the parameter service
+# exposed by robot_state_publisher. The normal Lime launch provides this
+# implicitly; the isolated runner must provide it explicitly.
+ros2 run robot_state_publisher robot_state_publisher "${URDF_PATH}" \
+  --ros-args -p use_sim_time:=true \
+  >"${RSP_LOG}" 2>&1 &
+RSP_PID=$!
+
+for _ in $(seq 1 30); do
+  ros2 service list 2>/dev/null | grep -qx '/robot_state_publisher/get_parameters' && break
+  kill -0 "${RSP_PID}" 2>/dev/null || {
+    cat "${RSP_LOG}"
+    exit 2
+  }
+  sleep 1
+done
+ros2 service list | grep -qx '/robot_state_publisher/get_parameters'
+
 gzserver /project/resource/rubiks_grasp_calibration.world \
   -s libgazebo_ros_init.so \
   -s libgazebo_ros_factory.so \
@@ -47,7 +72,7 @@ for _ in $(seq 1 90); do
   ros2 service list 2>/dev/null | grep -qx '/spawn_entity' && break
   kill -0 "${GZSERVER_PID}" 2>/dev/null || {
     cat "${SERVER_LOG}"
-    exit 2
+    exit 3
   }
   sleep 1
 done
@@ -63,7 +88,7 @@ for _ in $(seq 1 90); do
   ros2 service list 2>/dev/null | grep -qx '/controller_manager/list_controllers' && break
   kill -0 "${GZSERVER_PID}" 2>/dev/null || {
     cat "${SERVER_LOG}"
-    exit 3
+    exit 4
   }
   sleep 1
 done
