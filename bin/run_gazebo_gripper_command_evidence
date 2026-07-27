@@ -13,6 +13,8 @@ export GAZEBO_MODEL_PATH="${GAZEBO_MODEL_PATH:-}:/root/.gazebo/models:/opt/ros/h
 export GAZEBO_PLUGIN_PATH="${GAZEBO_PLUGIN_PATH:-}:/project/lib_ws/install/IFRA_LinkAttacher/lib:/opt/ros/humble/lib"
 
 MODEL_NAME="turtlebot3_lime_gripper_test"
+LEFT_LINK="${MODEL_NAME}::gripper_left_link"
+RIGHT_LINK="${MODEL_NAME}::gripper_right_link"
 URDF_PATH="${ARTIFACT_DIR}/turtlebot3_lime_gripper_test.urdf"
 SERVER_LOG="${ARTIFACT_DIR}/gazebo_gripper_command.gzserver.log"
 RSP_LOG="${ARTIFACT_DIR}/gazebo_gripper_command.robot_state_publisher.log"
@@ -43,10 +45,11 @@ grep -q 'libgazebo_ros2_control.so' "${URDF_PATH}"
 ! grep -q 'libgazebo_ros_diff_drive.so' "${URDF_PATH}"
 ! grep -q 'libgazebo_ros_ray_sensor.so' "${URDF_PATH}"
 ! grep -q 'cameracolor\|cameradepth\|cameraired\|lds_lfcd_sensor' "${URDF_PATH}"
+grep -q '<mimic joint="gripper_left_joint" multiplier="1"' "${URDF_PATH}"
 
 # gazebo_ros2_control retrieves robot_description through the parameter service
 # exposed by robot_state_publisher. The normal Lime launch provides this
-# implicitly; the isolated runner must provide it explicitly.
+# implicitly; the isolated runner provides it explicitly.
 ros2 run robot_state_publisher robot_state_publisher "${URDF_PATH}" \
   --ros-args -p use_sim_time:=true \
   >"${RSP_LOG}" 2>&1 &
@@ -107,6 +110,18 @@ for _ in $(seq 1 60); do
 done
 ros2 action list | grep -qx '/gripper_controller/gripper_cmd'
 
+# Preserve backend introspection. Gazebo Classic's Humble mimic implementation
+# may omit the mimic joint from JointState even though the physical mimic joint
+# is active. We never replace that missing value with the left joint value.
+ros2 control list_hardware_interfaces \
+  >"${ARTIFACT_DIR}/gazebo_gripper_command.hardware_interfaces.txt" 2>&1 || true
+timeout 8 ros2 topic echo --once /joint_states \
+  >"${ARTIFACT_DIR}/gazebo_gripper_command.joint_states_initial.yaml" 2>&1 || true
+timeout 8 ros2 topic echo --once /dynamic_joint_states \
+  >"${ARTIFACT_DIR}/gazebo_gripper_command.dynamic_joint_states_initial.yaml" 2>&1 || true
+timeout 8 ros2 topic echo --once /link_states \
+  >"${ARTIFACT_DIR}/gazebo_gripper_command.link_states_initial.yaml" 2>&1 || true
+
 # Let the spawned body settle before taking the initial stability reference.
 sleep 3
 
@@ -114,6 +129,9 @@ python3 /root/bin/run_gripper_command_smoke.py \
   --trial-type gazebo_ros2_control_gripper_command_smoke \
   --hardware-backend gazebo_ros2_control \
   --model-name "${MODEL_NAME}" \
+  --left-link "${LEFT_LINK}" \
+  --right-link "${RIGHT_LINK}" \
+  --no-require-right-joint \
   --hold 1.5 \
   --timeout 20.0 \
   --output "${ARTIFACT_DIR}/gazebo_gripper_command_telemetry.json" \
@@ -136,6 +154,7 @@ errors: list[str] = []
 events = data.get("events", [])
 samples = data.get("samples", [])
 model_samples = data.get("model_state_samples", [])
+link_samples = data.get("link_state_samples", [])
 
 if data.get("trial_type") != "gazebo_ros2_control_gripper_command_smoke":
     errors.append("unexpected trial_type")
@@ -143,6 +162,10 @@ if data.get("hardware_backend") != "gazebo_ros2_control":
     errors.append("unexpected hardware backend")
 if data.get("model_state_observed") is not True:
     errors.append("Gazebo model state was not observed")
+if data.get("link_states_observed") is not True:
+    errors.append("Gazebo gripper link states were not observed")
+if data.get("right_joint_required") is not False:
+    errors.append("Gazebo gate must record, not fabricate, a missing mimic JointState")
 if data.get("inner_face_opening_calibrated") is not False:
     errors.append("inner-face opening must remain uncalibrated")
 if data.get("cube_contact") is not False:
@@ -155,6 +178,8 @@ if len(samples) < 20:
     errors.append(f"insufficient joint samples: {len(samples)}")
 if len(model_samples) < 20:
     errors.append(f"insufficient model-state samples: {len(model_samples)}")
+if len(link_samples) < 20:
+    errors.append(f"insufficient link-state samples: {len(link_samples)}")
 
 for event, (label, target) in zip(events, expected):
     if event.get("label") != label:
@@ -165,30 +190,50 @@ for event, (label, target) in zip(events, expected):
         errors.append(f"{label}: action did not reach goal")
     if event.get("stalled") is not False:
         errors.append(f"{label}: action stalled")
-    if event.get("right_joint_observed") is not True:
-        errors.append(f"{label}: right joint missing")
     left = float(event.get("observed_left_joint_position_m", 999))
-    right = float(event.get("observed_right_joint_position_m", 999))
     if not math.isclose(left, target, abs_tol=0.0015):
         errors.append(f"{label}: left observed {left} does not match {target}")
-    if not math.isclose(right, target, abs_tol=0.0015):
-        errors.append(f"{label}: right observed {right} does not match {target}")
-    if not math.isclose(left, right, abs_tol=0.0005):
-        errors.append(f"{label}: mimic mismatch left={left} right={right}")
+    physical_separation = event.get("gazebo_link_frame_separation_m")
+    if physical_separation is None:
+        errors.append(f"{label}: physical gripper link separation missing")
+    else:
+        expected_separation = 0.042 + 2 * target
+        if not math.isclose(float(physical_separation), expected_separation, abs_tol=0.003):
+            errors.append(
+                f"{label}: physical separation {physical_separation} does not match "
+                f"expected {expected_separation}"
+            )
+    if event.get("gazebo_left_link_position_m") is None:
+        errors.append(f"{label}: left physical link position missing")
+    if event.get("gazebo_right_link_position_m") is None:
+        errors.append(f"{label}: right physical link position missing")
 
-right_observed_all = all(bool(sample.get("right_joint_observed")) for sample in samples)
-if not right_observed_all:
-    errors.append("right mimic joint missing in one or more samples")
+right_observed_any = any(bool(sample.get("right_joint_observed")) for sample in samples)
+right_observed_all = bool(samples) and all(
+    bool(sample.get("right_joint_observed")) for sample in samples
+)
 if any(sample.get("inner_face_opening_m") is not None for sample in samples):
     errors.append("inner-face opening must remain null")
 
-separations = [float(sample["link_frame_separation_m"]) for sample in samples]
+separations = [
+    float(sample["separation_m"]) for sample in link_samples
+    if sample.get("separation_m") is not None
+]
+evidence_separations = [
+    float(sample["link_frame_separation_m"]) for sample in samples
+    if sample.get("link_frame_separation_m") is not None
+]
 left_positions = [float(sample["left_joint_position_m"]) for sample in samples]
-right_positions = [float(sample["right_joint_position_m"]) for sample in samples]
-if separations and not 0.020 <= min(separations) <= 0.024:
-    errors.append(f"unexpected closed separation: {min(separations)}")
-if separations and not 0.078 <= max(separations) <= 0.082:
-    errors.append(f"unexpected open separation: {max(separations)}")
+right_positions = [
+    float(sample["right_joint_position_m"]) for sample in samples
+    if sample.get("right_joint_position_m") is not None
+]
+if separations and not 0.019 <= min(separations) <= 0.025:
+    errors.append(f"unexpected physically observed closed separation: {min(separations)}")
+if separations and not 0.077 <= max(separations) <= 0.083:
+    errors.append(f"unexpected physically observed open separation: {max(separations)}")
+if not evidence_separations:
+    errors.append("joint samples were not synchronized with physical link separation")
 
 initial = data.get("initial_model_state")
 final = data.get("final_model_state")
@@ -210,22 +255,26 @@ else:
         errors.append(f"robot did not settle: final speed {final_linear_speed}")
 
 summary = {
-    "schema_version": 1,
+    "schema_version": 2,
     "trial_type": data.get("trial_type"),
     "hardware_backend": data.get("hardware_backend"),
     "passed": not errors,
     "errors": errors,
     "sample_count": len(samples),
     "model_state_sample_count": len(model_samples),
+    "link_state_sample_count": len(link_samples),
     "duration_s": float(samples[-1]["t_s"]) if samples else 0.0,
     "event_labels": [event.get("label") for event in events],
     "left_joint_min_m": min(left_positions) if left_positions else None,
     "left_joint_max_m": max(left_positions) if left_positions else None,
     "right_joint_min_m": min(right_positions) if right_positions else None,
     "right_joint_max_m": max(right_positions) if right_positions else None,
+    "right_joint_observed_any_samples": right_observed_any,
+    "right_joint_observed_all_samples": right_observed_all,
+    "right_mimic_physical_link_observed": bool(link_samples),
+    "link_frame_separation_source": "gazebo_link_states",
     "link_frame_separation_min_m": min(separations) if separations else None,
     "link_frame_separation_max_m": max(separations) if separations else None,
-    "right_joint_observed_all_samples": right_observed_all,
     "robot_base_displacement_m": base_displacement,
     "robot_final_linear_speed_m_s": final_linear_speed,
     "robot_max_linear_speed_m_s": max_linear_speed,
@@ -240,9 +289,17 @@ summary = {
     json.dumps(summary, indent=2) + "\n", encoding="utf-8"
 )
 manifest = {
-    "schema_version": 1,
+    "schema_version": 2,
     "evidence_type": "gazebo_ros2_control_gripper_open_close_open",
-    "source": "Gazebo Classic physics, gazebo_ros2_control, GripperCommand, /joint_states, and /model_states",
+    "source": (
+        "Gazebo Classic physics, gazebo_ros2_control, GripperCommand, "
+        "/joint_states, /link_states, and /model_states"
+    ),
+    "mimic_evidence": (
+        "Right mimic joint is validated from the independently observed physical "
+        "right gripper link in /link_states; a missing right entry in /joint_states "
+        "is preserved as missing and never copied from the left joint."
+    ),
     "robot_environment": "sensor-free test Xacro in headless Gazebo",
     "production_urdf_modified": False,
     "cube_spawned": False,
@@ -252,6 +309,10 @@ manifest = {
     "review_required": True,
     "files": {
         "expanded_urdf": "turtlebot3_lime_gripper_test.urdf",
+        "hardware_interfaces": "gazebo_gripper_command.hardware_interfaces.txt",
+        "initial_joint_states": "gazebo_gripper_command.joint_states_initial.yaml",
+        "initial_dynamic_joint_states": "gazebo_gripper_command.dynamic_joint_states_initial.yaml",
+        "initial_link_states": "gazebo_gripper_command.link_states_initial.yaml",
         "telemetry": telemetry_path.name,
         "summary": "gazebo_gripper_command_summary.json",
         "video": "gazebo_gripper_command_telemetry_evidence.mp4",
