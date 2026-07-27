@@ -3,7 +3,7 @@ set -eo pipefail
 
 ARTIFACT_DIR="${1:-/artifacts}"
 mkdir -p "${ARTIFACT_DIR}"
-rm -f "${ARTIFACT_DIR}/trial_complete" "${ARTIFACT_DIR}/start_capture"
+rm -f "${ARTIFACT_DIR}/trial_complete" "${ARTIFACT_DIR}/recorder_ready"
 
 source /opt/ros/humble/setup.bash
 source /project/lib_ws/install/setup.bash
@@ -11,40 +11,32 @@ source /root/turtlebot3_ws/install/setup.bash
 set -u
 export GAZEBO_MODEL_PATH="${GAZEBO_MODEL_PATH:-}:/root/.gazebo/models:/opt/ros/humble/share/turtlebot3_gazebo/models"
 export GAZEBO_PLUGIN_PATH="${GAZEBO_PLUGIN_PATH:-}:/project/lib_ws/install/IFRA_LinkAttacher/lib:/opt/ros/humble/lib"
-export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
-export QT_X11_NO_MITSHM="${QT_X11_NO_MITSHM:-1}"
 
 SERVER_LOG="${ARTIFACT_DIR}/rubiks_cube_settle.gzserver.log"
-CLIENT_LOG="${ARTIFACT_DIR}/rubiks_cube_settle.gzclient.log"
 cleanup() {
   status=$?
   touch "${ARTIFACT_DIR}/trial_complete"
-  for pid in "${GZCLIENT_PID:-}" "${GZSERVER_PID:-}"; do
-    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
-      kill -INT "${pid}" 2>/dev/null || true
-    fi
-  done
-  sleep 2
-  for pid in "${GZCLIENT_PID:-}" "${GZSERVER_PID:-}"; do
-    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
-      kill -TERM "${pid}" 2>/dev/null || true
-      wait "${pid}" 2>/dev/null || true
-    fi
-  done
+  if [[ -n "${RECORDER_PID:-}" ]] && kill -0 "${RECORDER_PID}" 2>/dev/null; then
+    kill -TERM "${RECORDER_PID}" 2>/dev/null || true
+    wait "${RECORDER_PID}" 2>/dev/null || true
+  fi
+  if [[ -n "${GZSERVER_PID:-}" ]] && kill -0 "${GZSERVER_PID}" 2>/dev/null; then
+    kill -INT "${GZSERVER_PID}" 2>/dev/null || true
+    sleep 2
+    kill -TERM "${GZSERVER_PID}" 2>/dev/null || true
+    wait "${GZSERVER_PID}" 2>/dev/null || true
+  fi
   exit "${status}"
 }
 trap cleanup EXIT INT TERM
 
-# The first visual gate excludes the robot and its sensor plugins. Gazebo is
-# started directly to avoid the deprecated gazebo_ros EOL GUI client plugin.
+# This gate uses Gazebo physics without the GUI. Hosted Xvfb runners produced
+# black Gazebo Classic frames even while gzserver and /model_states were valid.
 gzserver /project/resource/rubiks_grasp_calibration.world \
   -s libgazebo_ros_init.so \
   -s libgazebo_ros_factory.so \
   >"${SERVER_LOG}" 2>&1 &
 GZSERVER_PID=$!
-
-gzclient --verbose >"${CLIENT_LOG}" 2>&1 &
-GZCLIENT_PID=$!
 
 for _ in $(seq 1 90); do
   ros2 service list 2>/dev/null | grep -qx '/spawn_entity' && break
@@ -56,18 +48,28 @@ for _ in $(seq 1 90); do
 done
 ros2 service list | grep -qx '/spawn_entity'
 
-for _ in $(seq 1 90); do
-  [[ -f "${ARTIFACT_DIR}/start_capture" ]] && break
-  kill -0 "${GZCLIENT_PID}" 2>/dev/null || {
-    cat "${CLIENT_LOG}"
+python3 /root/bin/rubiks_grasp_preflight.py validate-model \
+  >"${ARTIFACT_DIR}/rubiks_cube_model_validation.json"
+
+python3 /root/bin/record_rubiks_model_states.py \
+  --entity rubiks_cube_settle \
+  --duration 10 \
+  --max-rate 30 \
+  --wait-timeout 30 \
+  --ready-file "${ARTIFACT_DIR}/recorder_ready" \
+  --output "${ARTIFACT_DIR}/rubiks_cube_trajectory.json" \
+  >"${ARTIFACT_DIR}/rubiks_cube_trajectory_recorder.log" 2>&1 &
+RECORDER_PID=$!
+
+for _ in $(seq 1 30); do
+  [[ -f "${ARTIFACT_DIR}/recorder_ready" ]] && break
+  kill -0 "${RECORDER_PID}" 2>/dev/null || {
+    cat "${ARTIFACT_DIR}/rubiks_cube_trajectory_recorder.log"
     exit 3
   }
   sleep 1
 done
-[[ -f "${ARTIFACT_DIR}/start_capture" ]]
-
-python3 /root/bin/rubiks_grasp_preflight.py validate-model \
-  >"${ARTIFACT_DIR}/rubiks_cube_model_validation.json"
+[[ -f "${ARTIFACT_DIR}/recorder_ready" ]]
 
 ros2 run gazebo_ros spawn_entity.py \
   -entity rubiks_cube_settle \
@@ -75,12 +77,11 @@ ros2 run gazebo_ros spawn_entity.py \
   -x 0.45 -y 0.0 -z 0.35 -Y 0.35 \
   >"${ARTIFACT_DIR}/rubiks_cube_spawn.log" 2>&1
 
-timeout 8 ros2 topic echo --once /model_states \
-  >"${ARTIFACT_DIR}/rubiks_cube_model_states_initial.yaml" 2>&1 || true
-sleep 10
+wait "${RECORDER_PID}"
+unset RECORDER_PID
+
 timeout 8 ros2 topic echo --once /model_states \
   >"${ARTIFACT_DIR}/rubiks_cube_model_states_final.yaml" 2>&1 || true
-sleep 3
 
 python3 - "${ARTIFACT_DIR}" <<'PY'
 import json
@@ -88,21 +89,25 @@ from pathlib import Path
 import sys
 
 root = Path(sys.argv[1])
+trajectory = json.loads((root / "rubiks_cube_trajectory.json").read_text(encoding="utf-8"))
 manifest = {
     "schema_version": 1,
-    "trial_type": "spawn_settle_visual_evidence",
+    "trial_type": "spawn_settle_telemetry_evidence",
+    "evidence_source": "gazebo_model_states",
     "automatic_grasp_success": False,
     "robot_spawned": False,
     "gripper_motion_performed": False,
+    "raw_gazebo_gui_video": False,
     "entity": "rubiks_cube_settle",
     "spawn": {"x_m": 0.45, "y_m": 0.0, "z_m": 0.35, "yaw_rad": 0.35},
     "observation_seconds": 10,
+    "sample_count": trajectory["sample_count"],
     "review_required": True,
     "files": {
-        "initial_model_states": "rubiks_cube_model_states_initial.yaml",
+        "trajectory": "rubiks_cube_trajectory.json",
         "final_model_states": "rubiks_cube_model_states_final.yaml",
-        "model_validation": "rubiks_cube_model_validation.json",
-    },
+        "model_validation": "rubiks_cube_model_validation.json"
+    }
 }
 (root / "rubiks_cube_settle.manifest.json").write_text(
     json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
