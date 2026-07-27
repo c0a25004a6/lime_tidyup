@@ -1,0 +1,129 @@
+name: Rubik grasp video evidence
+
+on:
+  push:
+    paths:
+      - "bin/run_rubiks_cube_settle_video"
+      - "project/resource/rubiks_grasp_calibration.world"
+      - "project/resource/model_editor_models/rubiks_cube/**"
+      - ".github/workflows/rubiks-grasp-video.yml"
+  pull_request:
+    paths:
+      - "bin/run_rubiks_cube_settle_video"
+      - "project/resource/rubiks_grasp_calibration.world"
+      - "project/resource/model_editor_models/rubiks_cube/**"
+      - ".github/workflows/rubiks-grasp-video.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  visual-evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate evidence harness
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          ET.parse('project/resource/rubiks_grasp_calibration.world')
+          PY
+          bash -n bin/run_rubiks_cube_settle_video
+      - name: Install capture dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb openbox xdotool ffmpeg
+      - name: Build current Lime simulation image
+        run: docker build -t lime-tidyup-rubiks-video:${{ github.sha }} .
+      - name: Run isolated settle trial and capture Gazebo
+        env:
+          DISPLAY: :99
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          Xvfb :99 -screen 0 1280x720x24 -ac +extension GLX +render -noreset \
+            >artifacts/xvfb.log 2>&1 &
+          XVFB_PID=$!
+          openbox --display :99 >artifacts/openbox.log 2>&1 &
+          OPENBOX_PID=$!
+          cleanup() {
+            docker rm -f rubiks-cube-settle-video >/dev/null 2>&1 || true
+            kill "$OPENBOX_PID" "$XVFB_PID" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          sleep 2
+
+          docker run --name rubiks-cube-settle-video --network host \
+            -e DISPLAY=:99 \
+            -e LIBGL_ALWAYS_SOFTWARE=1 \
+            -e QT_X11_NO_MITSHM=1 \
+            -v /tmp/.X11-unix:/tmp/.X11-unix \
+            -v "$PWD/artifacts:/artifacts" \
+            lime-tidyup-rubiks-video:${{ github.sha }} \
+            bash -lc '/root/bin/run_rubiks_cube_settle_video /artifacts' \
+            >artifacts/container.log 2>&1 &
+          CONTAINER_RUN_PID=$!
+
+          found=0
+          for _ in $(seq 1 90); do
+            if DISPLAY=:99 xdotool search --name 'Gazebo' >/dev/null 2>&1; then
+              found=1
+              break
+            fi
+            if ! kill -0 "$CONTAINER_RUN_PID" 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          if [[ "$found" != 1 ]]; then
+            cat artifacts/container.log
+            exit 1
+          fi
+
+          ffmpeg -y -loglevel warning \
+            -f x11grab -video_size 1280x720 -framerate 20 -i :99.0 \
+            -c:v libx264 -preset veryfast -crf 24 -pix_fmt yuv420p \
+            artifacts/rubiks_cube_settle_visual_evidence.mp4 \
+            >artifacts/ffmpeg.log 2>&1 &
+          FFMPEG_PID=$!
+          touch artifacts/start_capture
+
+          for _ in $(seq 1 120); do
+            [[ -f artifacts/trial_complete ]] && break
+            kill -0 "$CONTAINER_RUN_PID" 2>/dev/null || break
+            sleep 1
+          done
+          wait "$CONTAINER_RUN_PID"
+          kill -INT "$FFMPEG_PID" >/dev/null 2>&1 || true
+          wait "$FFMPEG_PID" || true
+
+          test -s artifacts/rubiks_cube_settle_visual_evidence.mp4
+          test -s artifacts/rubiks_cube_settle.manifest.json
+          test -s artifacts/rubiks_cube_model_validation.json
+          ffprobe -v error -show_entries format=duration,size \
+            -of json artifacts/rubiks_cube_settle_visual_evidence.mp4 \
+            >artifacts/rubiks_cube_settle_visual_evidence.ffprobe.json
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          probe = json.loads(Path('artifacts/rubiks_cube_settle_visual_evidence.ffprobe.json').read_text())
+          duration = float(probe['format']['duration'])
+          if duration < 8.0:
+              raise SystemExit(f'video too short: {duration}')
+          manifest = json.loads(Path('artifacts/rubiks_cube_settle.manifest.json').read_text())
+          if manifest.get('automatic_grasp_success') is not False:
+              raise SystemExit('settle evidence must not declare grasp success')
+          if manifest.get('gripper_motion_performed') is not False:
+              raise SystemExit('first visual gate must not move the gripper')
+          print(f'video duration: {duration:.2f}s')
+          PY
+      - name: Upload video and evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-cube-settle-video-evidence
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30
