@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render gripper joint-state telemetry into a deterministic MP4 evidence video."""
+"""Render gripper telemetry into a deterministic MP4 evidence video."""
 from __future__ import annotations
 
 import argparse
@@ -43,13 +43,9 @@ def line(
     err = dx + dy
     while True:
         fill_rect(
-            buf,
-            width,
-            height,
-            x0 - thickness // 2,
-            y0 - thickness // 2,
-            x0 + thickness // 2 + 1,
-            y0 + thickness // 2 + 1,
+            buf, width, height,
+            x0 - thickness // 2, y0 - thickness // 2,
+            x0 + thickness // 2 + 1, y0 + thickness // 2 + 1,
             color,
         )
         if x0 == x1 and y0 == y1:
@@ -78,6 +74,10 @@ def outline(
     line(buf, width, height, x0, y1, x0, y0, color, thickness)
 
 
+def numeric(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def interpolate(samples: list[dict], times: list[float], t: float) -> dict:
     index = bisect.bisect_left(times, t)
     if index <= 0:
@@ -91,13 +91,21 @@ def interpolate(samples: list[dict], times: list[float], t: float) -> dict:
     for key in (
         "left_joint_position_m",
         "right_joint_position_m",
+        "joint_derived_link_frame_separation_m",
+        "gazebo_link_frame_separation_m",
         "link_frame_separation_m",
     ):
-        result[key] = (1 - fraction) * float(before[key]) + fraction * float(after[key])
+        before_value = before.get(key)
+        after_value = after.get(key)
+        if numeric(before_value) and numeric(after_value):
+            result[key] = (1 - fraction) * float(before_value) + fraction * float(after_value)
+        elif fraction >= 0.5:
+            result[key] = after_value
     result["t_s"] = t
     if fraction >= 0.5:
         result["phase"] = after.get("phase", before.get("phase", "initial"))
         result["command_target_m"] = after.get("command_target_m")
+        result["link_frame_separation_source"] = after.get("link_frame_separation_source")
     return result
 
 
@@ -125,6 +133,7 @@ def render_frame(
     white = (238, 242, 247)
     yellow = (245, 205, 45)
     cyan = (55, 200, 220)
+    physical = (185, 105, 235)
     buf = bytearray(bytes(background) * (width * height))
 
     margin = 38
@@ -139,7 +148,11 @@ def render_frame(
 
     phase = str(state.get("phase", "initial"))
     phase_tint = phase_color(phase)
-    fill_rect(buf, width, height, left_panel[0], left_panel[1], left_panel[2], left_panel[1] + 12, phase_tint)
+    fill_rect(
+        buf, width, height,
+        left_panel[0], left_panel[1], left_panel[2], left_panel[1] + 12,
+        phase_tint,
+    )
 
     center_x = (left_panel[0] + left_panel[2]) // 2
     center_y = (left_panel[1] + left_panel[3]) // 2
@@ -153,14 +166,22 @@ def render_frame(
         line(buf, width, height, center_x - half, center_y - 130, center_x - half, center_y + 130, grid, 1)
         line(buf, width, height, center_x + half, center_y - 130, center_x + half, center_y + 130, grid, 1)
 
-    separation = float(state["link_frame_separation_m"])
+    separation_value = state.get("link_frame_separation_m")
+    if not numeric(separation_value):
+        raise ValueError("sample does not contain an observed link-frame separation")
+    separation = float(separation_value)
     half_px = separation_x(separation) // 2
     left_frame_x = center_x + half_px
     right_frame_x = center_x - half_px
     jaw_top = center_y - 115
     jaw_bottom = center_y + 115
-    fill_rect(buf, width, height, left_frame_x - 13, jaw_top, left_frame_x + 13, jaw_bottom, phase_tint)
-    fill_rect(buf, width, height, right_frame_x - 13, jaw_top, right_frame_x + 13, jaw_bottom, phase_tint)
+    observed_color = (
+        physical
+        if state.get("link_frame_separation_source") == "gazebo_link_states"
+        else phase_tint
+    )
+    fill_rect(buf, width, height, left_frame_x - 13, jaw_top, left_frame_x + 13, jaw_bottom, observed_color)
+    fill_rect(buf, width, height, right_frame_x - 13, jaw_top, right_frame_x + 13, jaw_bottom, observed_color)
     line(buf, width, height, right_frame_x, center_y, left_frame_x, center_y, white, 3)
     line(buf, width, height, center_x, center_y - 145, center_x, center_y + 145, grid, 2)
 
@@ -185,18 +206,23 @@ def render_frame(
 
     def graph_point(sample: dict) -> tuple[int, int]:
         sample_t = float(sample["t_s"])
-        value = float(sample["link_frame_separation_m"])
+        value = sample.get("link_frame_separation_m")
+        if not numeric(value):
+            raise ValueError("sample does not contain an observed separation")
         x = graph_left + int(sample_t / max(duration, 1e-9) * (graph_right - graph_left))
-        y = graph_bottom - int(value / 0.09 * (graph_bottom - graph_top))
+        y = graph_bottom - int(float(value) / 0.09 * (graph_bottom - graph_top))
         return x, y
 
-    visible = [sample for sample in samples if float(sample["t_s"]) <= t]
+    visible = [
+        sample for sample in samples
+        if float(sample["t_s"]) <= t and numeric(sample.get("link_frame_separation_m"))
+    ]
     for before, after in zip(visible, visible[1:]):
         a = graph_point(before)
         b = graph_point(after)
         line(buf, width, height, a[0], a[1], b[0], b[1], cyan, 3)
     current = graph_point(state)
-    fill_rect(buf, width, height, current[0] - 5, current[1] - 5, current[0] + 6, current[1] + 6, phase_tint)
+    fill_rect(buf, width, height, current[0] - 5, current[1] - 5, current[0] + 6, current[1] + 6, observed_color)
 
     for separation_target in (0.022, 0.080):
         y = graph_bottom - int(separation_target / 0.09 * (graph_bottom - graph_top))
@@ -205,11 +231,8 @@ def render_frame(
     progress_y = height - 21
     fill_rect(buf, width, height, margin, progress_y, width - margin, progress_y + 8, grid)
     fill_rect(
-        buf,
-        width,
-        height,
-        margin,
-        progress_y,
+        buf, width, height,
+        margin, progress_y,
         margin + int((width - 2 * margin) * min(1.0, max(0.0, t / duration))),
         progress_y + 8,
         phase_tint,
@@ -227,9 +250,12 @@ def main() -> int:
     args = parser.parse_args()
 
     telemetry = json.loads(Path(args.telemetry).read_text(encoding="utf-8"))
-    samples = telemetry.get("samples", [])
+    samples = [
+        sample for sample in telemetry.get("samples", [])
+        if numeric(sample.get("link_frame_separation_m"))
+    ]
     if len(samples) < 3:
-        raise SystemExit("telemetry has too few samples")
+        raise SystemExit("telemetry has too few samples with observed separation")
     times = [float(sample["t_s"]) for sample in samples]
     duration = max(times[-1], 1.0)
     frame_count = max(1, round(duration * args.fps))
@@ -257,6 +283,10 @@ def main() -> int:
         "source": args.telemetry,
         "output": args.output,
         "inner_face_opening_rendered": False,
+        "separation_sources": sorted({
+            sample.get("link_frame_separation_source") for sample in samples
+            if sample.get("link_frame_separation_source")
+        }),
     }, indent=2))
     return 0
 
