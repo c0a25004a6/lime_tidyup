@@ -1,0 +1,113 @@
+name: Rubik gripper command evidence
+
+on:
+  push:
+    paths:
+      - "bin/run_gripper_command_smoke.py"
+      - "bin/run_gripper_command_evidence"
+      - "bin/render_gripper_command_video.py"
+      - "doc/rubiks_gripper_command_evidence.md"
+      - ".github/workflows/rubiks-gripper-command-evidence.yml"
+  pull_request:
+    paths:
+      - "bin/run_gripper_command_smoke.py"
+      - "bin/run_gripper_command_evidence"
+      - "bin/render_gripper_command_video.py"
+      - "doc/rubiks_gripper_command_evidence.md"
+      - ".github/workflows/rubiks-gripper-command-evidence.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gripper-command-evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate evidence tools
+        run: |
+          python3 -m py_compile \
+            bin/run_gripper_command_smoke.py \
+            bin/render_gripper_command_video.py
+          bash -n bin/run_gripper_command_evidence
+
+      - name: Install video encoder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Build current Lime simulation image
+        run: docker build -t lime-tidyup-gripper-evidence:${{ github.sha }} .
+
+      - name: Run fake-hardware gripper command trial
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          docker run --rm --network host \
+            -v "$PWD/artifacts:/artifacts" \
+            lime-tidyup-gripper-evidence:${{ github.sha }} \
+            bash -lc 'bash /root/bin/run_gripper_command_evidence /artifacts' \
+            >artifacts/container.stdout.log 2>artifacts/container.stderr.log
+
+      - name: Validate command telemetry
+        run: |
+          test -s artifacts/gripper_command_telemetry.json
+          test -s artifacts/gripper_command_summary.json
+          test -s artifacts/gripper_command_evidence.manifest.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          summary = json.loads(Path('artifacts/gripper_command_summary.json').read_text())
+          if summary.get('passed') is not True:
+              raise SystemExit(summary.get('errors'))
+          if summary.get('event_labels') != ['open_1', 'close', 'open_2']:
+              raise SystemExit('unexpected command sequence')
+          if summary.get('right_joint_observed_all_samples') is not True:
+              raise SystemExit('right mimic joint was not continuously observed')
+          if not 0.020 <= float(summary['link_frame_separation_min_m']) <= 0.024:
+              raise SystemExit(f"unexpected closed separation: {summary['link_frame_separation_min_m']}")
+          if not 0.078 <= float(summary['link_frame_separation_max_m']) <= 0.082:
+              raise SystemExit(f"unexpected open separation: {summary['link_frame_separation_max_m']}")
+          if summary.get('inner_face_opening_calibrated') is not False:
+              raise SystemExit('inner-face opening must remain uncalibrated')
+          if summary.get('cube_contact') is not False:
+              raise SystemExit('cube contact must remain false')
+          if summary.get('grasp_success_claimed') is not False:
+              raise SystemExit('grasp success must not be claimed')
+          print(json.dumps(summary, indent=2))
+          PY
+
+      - name: Render joint-state evidence video
+        run: |
+          python3 bin/render_gripper_command_video.py \
+            --telemetry artifacts/gripper_command_telemetry.json \
+            --output artifacts/gripper_command_telemetry_evidence.mp4
+          ffprobe -v error -show_entries format=duration,size \
+            -of json artifacts/gripper_command_telemetry_evidence.mp4 \
+            >artifacts/gripper_command_telemetry_evidence.ffprobe.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          probe = json.loads(Path('artifacts/gripper_command_telemetry_evidence.ffprobe.json').read_text())
+          duration = float(probe['format']['duration'])
+          size = int(probe['format']['size'])
+          if duration < 4.0:
+              raise SystemExit(f'video too short: {duration}')
+          if size < 10000:
+              raise SystemExit(f'video unexpectedly small: {size}')
+          print(f'video duration={duration:.3f}s size={size}')
+          PY
+
+      - name: Upload gripper command evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-gripper-command-evidence
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
