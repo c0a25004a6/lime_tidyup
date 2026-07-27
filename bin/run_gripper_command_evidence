@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+ARTIFACT_DIR="${1:-/artifacts}"
+mkdir -p "${ARTIFACT_DIR}"
+
+source /opt/ros/humble/setup.bash
+source /root/turtlebot3_ws/install/setup.bash
+set -u
+
+LAUNCH_LOG="${ARTIFACT_DIR}/gripper_command_fake_hardware.launch.log"
+cleanup() {
+  status=$?
+  if [[ -n "${LAUNCH_PID:-}" ]] && kill -0 "${LAUNCH_PID}" 2>/dev/null; then
+    kill -INT "${LAUNCH_PID}" 2>/dev/null || true
+    sleep 2
+    kill -TERM "${LAUNCH_PID}" 2>/dev/null || true
+    wait "${LAUNCH_PID}" 2>/dev/null || true
+  fi
+  exit "${status}"
+}
+trap cleanup EXIT INT TERM
+
+ros2 launch turtlebot3_lime_bringup base.launch.py \
+  start_rviz:=false \
+  use_sim:=false \
+  use_fake_hardware:=true \
+  fake_sensor_commands:=false \
+  >"${LAUNCH_LOG}" 2>&1 &
+LAUNCH_PID=$!
+
+for _ in $(seq 1 90); do
+  if ros2 action list 2>/dev/null | grep -qx '/gripper_controller/gripper_cmd'; then
+    break
+  fi
+  kill -0 "${LAUNCH_PID}" 2>/dev/null || {
+    cat "${LAUNCH_LOG}"
+    exit 2
+  }
+  sleep 1
+done
+ros2 action list | grep -qx '/gripper_controller/gripper_cmd'
+
+for _ in $(seq 1 60); do
+  if timeout 3 ros2 topic echo --once /joint_states 2>/dev/null | grep -q 'gripper_left_joint'; then
+    break
+  fi
+  sleep 1
+done
+timeout 5 ros2 topic echo --once /joint_states \
+  >"${ARTIFACT_DIR}/joint_states_before.yaml"
+grep -q 'gripper_left_joint' "${ARTIFACT_DIR}/joint_states_before.yaml"
+grep -q 'gripper_right_joint' "${ARTIFACT_DIR}/joint_states_before.yaml"
+
+python3 /root/bin/run_gripper_command_smoke.py \
+  --output "${ARTIFACT_DIR}/gripper_command_telemetry.json" \
+  >"${ARTIFACT_DIR}/gripper_command_smoke.stdout.json" 2>"${ARTIFACT_DIR}/gripper_command_smoke.stderr.log"
+
+timeout 5 ros2 topic echo --once /joint_states \
+  >"${ARTIFACT_DIR}/joint_states_after.yaml"
+
+python3 - "${ARTIFACT_DIR}" <<'PY'
+from __future__ import annotations
+
+import json
+import math
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+telemetry_path = root / "gripper_command_telemetry.json"
+data = json.loads(telemetry_path.read_text(encoding="utf-8"))
+
+expected = [
+    ("open_1", 0.019),
+    ("close", -0.010),
+    ("open_2", 0.019),
+]
+errors: list[str] = []
+events = data.get("events", [])
+samples = data.get("samples", [])
+
+if data.get("trial_type") != "fake_hardware_gripper_command_smoke":
+    errors.append("unexpected trial_type")
+if data.get("inner_face_opening_calibrated") is not False:
+    errors.append("inner-face opening must remain uncalibrated")
+if data.get("cube_contact") is not False:
+    errors.append("cube contact must remain false")
+if data.get("grasp_success_claimed") is not False:
+    errors.append("grasp success must not be claimed")
+if len(events) != len(expected):
+    errors.append(f"expected 3 events, got {len(events)}")
+if len(samples) < 20:
+    errors.append(f"insufficient telemetry samples: {len(samples)}")
+
+for event, (label, target) in zip(events, expected):
+    if event.get("label") != label:
+        errors.append(f"event label mismatch: {event.get('label')} != {label}")
+    if not math.isclose(float(event.get("target_position_m", 999)), target, abs_tol=1e-9):
+        errors.append(f"{label}: target mismatch")
+    if event.get("reached_goal") is not True:
+        errors.append(f"{label}: action did not report reached_goal")
+    if event.get("stalled") is not False:
+        errors.append(f"{label}: action reported stalled")
+    if event.get("right_joint_observed") is not True:
+        errors.append(f"{label}: right mimic joint was not observed")
+    left = float(event.get("observed_left_joint_position_m", 999))
+    right = float(event.get("observed_right_joint_position_m", 999))
+    if not math.isclose(left, target, abs_tol=0.0015):
+        errors.append(f"{label}: left observed {left} does not match {target}")
+    if not math.isclose(right, target, abs_tol=0.0015):
+        errors.append(f"{label}: right observed {right} does not match {target}")
+    if not math.isclose(left, right, abs_tol=0.0005):
+        errors.append(f"{label}: mimic mismatch left={left} right={right}")
+
+right_observed_all = all(bool(sample.get("right_joint_observed")) for sample in samples)
+if not right_observed_all:
+    errors.append("right mimic joint missing in one or more samples")
+if any(sample.get("inner_face_opening_m") is not None for sample in samples):
+    errors.append("inner-face opening must remain null")
+
+separations = [float(sample["link_frame_separation_m"]) for sample in samples]
+left_positions = [float(sample["left_joint_position_m"]) for sample in samples]
+right_positions = [float(sample["right_joint_position_m"]) for sample in samples]
+summary = {
+    "schema_version": 1,
+    "trial_type": data.get("trial_type"),
+    "passed": not errors,
+    "errors": errors,
+    "sample_count": len(samples),
+    "duration_s": float(samples[-1]["t_s"]) if samples else 0.0,
+    "event_labels": [event.get("label") for event in events],
+    "left_joint_min_m": min(left_positions) if left_positions else None,
+    "left_joint_max_m": max(left_positions) if left_positions else None,
+    "right_joint_min_m": min(right_positions) if right_positions else None,
+    "right_joint_max_m": max(right_positions) if right_positions else None,
+    "link_frame_separation_min_m": min(separations) if separations else None,
+    "link_frame_separation_max_m": max(separations) if separations else None,
+    "right_joint_observed_all_samples": right_observed_all,
+    "inner_face_opening_calibrated": False,
+    "cube_contact": False,
+    "grasp_success_claimed": False,
+}
+(root / "gripper_command_summary.json").write_text(
+    json.dumps(summary, indent=2) + "\n", encoding="utf-8"
+)
+manifest = {
+    "schema_version": 1,
+    "evidence_type": "fake_hardware_gripper_open_close_open",
+    "source": "ROS 2 GripperCommand action and /joint_states",
+    "robot_environment": "GenericSystem fake hardware",
+    "cube_spawned": False,
+    "cube_contact": False,
+    "inner_face_opening_calibrated": False,
+    "grasp_success_claimed": False,
+    "review_required": True,
+    "files": {
+        "telemetry": telemetry_path.name,
+        "summary": "gripper_command_summary.json",
+        "video": "gripper_command_telemetry_evidence.mp4",
+    },
+}
+(root / "gripper_command_evidence.manifest.json").write_text(
+    json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+)
+print(json.dumps(summary, indent=2))
+if errors:
+    raise SystemExit("; ".join(errors))
+PY
