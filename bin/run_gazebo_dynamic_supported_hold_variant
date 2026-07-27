@@ -42,7 +42,7 @@ shell_text = shell_text.replace(
 )
 shell_text = shell_text.replace(
     python_command_anchor,
-    f"PYTHONPATH=/root/bin python3 {temp_python}",
+    f"PYTHONPATH=/root/bin:${{PYTHONPATH:-}} python3 {temp_python}",
     1,
 )
 temp_shell.write_text(shell_text, encoding="utf-8")
