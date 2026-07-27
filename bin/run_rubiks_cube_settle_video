@@ -14,33 +14,42 @@ export GAZEBO_PLUGIN_PATH="${GAZEBO_PLUGIN_PATH:-}:/project/lib_ws/install/IFRA_
 export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
 export QT_X11_NO_MITSHM="${QT_X11_NO_MITSHM:-1}"
 
-LAUNCH_LOG="${ARTIFACT_DIR}/rubiks_cube_settle.launch.log"
+SERVER_LOG="${ARTIFACT_DIR}/rubiks_cube_settle.gzserver.log"
+CLIENT_LOG="${ARTIFACT_DIR}/rubiks_cube_settle.gzclient.log"
 cleanup() {
   status=$?
   touch "${ARTIFACT_DIR}/trial_complete"
-  if [[ -n "${LAUNCH_PID:-}" ]] && kill -0 "${LAUNCH_PID}" 2>/dev/null; then
-    kill -INT "${LAUNCH_PID}" 2>/dev/null || true
-    sleep 2
-    kill -TERM "${LAUNCH_PID}" 2>/dev/null || true
-    wait "${LAUNCH_PID}" 2>/dev/null || true
-  fi
+  for pid in "${GZCLIENT_PID:-}" "${GZSERVER_PID:-}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+      kill -INT "${pid}" 2>/dev/null || true
+    fi
+  done
+  sleep 2
+  for pid in "${GZCLIENT_PID:-}" "${GZSERVER_PID:-}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+      kill -TERM "${pid}" 2>/dev/null || true
+      wait "${pid}" 2>/dev/null || true
+    fi
+  done
   exit "${status}"
 }
 trap cleanup EXIT INT TERM
 
-# The first visual gate deliberately excludes the robot and its rendering
-# sensors. It validates only the cube model, gravity, collision, settle
-# behavior, Gazebo GUI, and recording path.
-ros2 launch gazebo_ros gazebo.launch.py \
-  verbose:=false \
-  world:=/project/resource/rubiks_grasp_calibration.world \
-  >"${LAUNCH_LOG}" 2>&1 &
-LAUNCH_PID=$!
+# The first visual gate excludes the robot and its sensor plugins. Gazebo is
+# started directly to avoid the deprecated gazebo_ros EOL GUI client plugin.
+gzserver /project/resource/rubiks_grasp_calibration.world \
+  -s libgazebo_ros_init.so \
+  -s libgazebo_ros_factory.so \
+  >"${SERVER_LOG}" 2>&1 &
+GZSERVER_PID=$!
+
+gzclient --verbose >"${CLIENT_LOG}" 2>&1 &
+GZCLIENT_PID=$!
 
 for _ in $(seq 1 90); do
   ros2 service list 2>/dev/null | grep -qx '/spawn_entity' && break
-  kill -0 "${LAUNCH_PID}" 2>/dev/null || {
-    cat "${LAUNCH_LOG}"
+  kill -0 "${GZSERVER_PID}" 2>/dev/null || {
+    cat "${SERVER_LOG}"
     exit 2
   }
   sleep 1
@@ -49,6 +58,10 @@ ros2 service list | grep -qx '/spawn_entity'
 
 for _ in $(seq 1 90); do
   [[ -f "${ARTIFACT_DIR}/start_capture" ]] && break
+  kill -0 "${GZCLIENT_PID}" 2>/dev/null || {
+    cat "${CLIENT_LOG}"
+    exit 3
+  }
   sleep 1
 done
 [[ -f "${ARTIFACT_DIR}/start_capture" ]]
@@ -62,10 +75,10 @@ ros2 run gazebo_ros spawn_entity.py \
   -x 0.45 -y 0.0 -z 0.35 -Y 0.35 \
   >"${ARTIFACT_DIR}/rubiks_cube_spawn.log" 2>&1
 
-timeout 8 ros2 topic echo --once /gazebo/model_states \
+timeout 8 ros2 topic echo --once /model_states \
   >"${ARTIFACT_DIR}/rubiks_cube_model_states_initial.yaml" 2>&1 || true
 sleep 10
-timeout 8 ros2 topic echo --once /gazebo/model_states \
+timeout 8 ros2 topic echo --once /model_states \
   >"${ARTIFACT_DIR}/rubiks_cube_model_states_final.yaml" 2>&1 || true
 sleep 3
 
