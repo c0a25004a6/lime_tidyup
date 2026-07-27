@@ -110,6 +110,33 @@ new_block = '''        target = args.close_start
                 monitor_contact=not aligning,
             )
             events.append(event)
+
+            if event["contact_observed"] or first_unilateral_target is not None:
+                if node.latest_gauge_state is None:
+                    raise RuntimeError("cube state was lost during alignment")
+                alignment_offset = state_distance(
+                    settled_cube_state, node.latest_gauge_state
+                )
+                if float(alignment_offset["horizontal_displacement_m"]) > 0.003:
+                    raise RuntimeError(
+                        "cube exceeded 3 mm horizontal movement during alignment: "
+                        f"{alignment_offset}"
+                    )
+                if float(alignment_offset["vertical_displacement_m"]) > 0.0015:
+                    raise RuntimeError(
+                        "cube rose more than 1.5 mm during alignment: "
+                        f"{alignment_offset}"
+                    )
+                if float(alignment_offset["rotation_rad"]) > 0.10:
+                    raise RuntimeError(
+                        "cube rotated more than 0.10 rad during alignment: "
+                        f"{alignment_offset}"
+                    )
+                if node.unexpected_robot_contacts:
+                    raise RuntimeError(
+                        "cube contacted a non-finger robot collision during alignment"
+                    )
+
             if event["dual_contact_observed"]:
                 contact_event = event
                 break
