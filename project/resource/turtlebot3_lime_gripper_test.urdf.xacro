@@ -7,6 +7,10 @@
 -->
 <robot name="turtlebot3_lime_gripper_test" xmlns:xacro="http://www.ros.org/wiki/xacro">
   <xacro:arg name="prefix" default="" />
+  <!-- The upstream ros2_control macro reads these global args internally. -->
+  <xacro:arg name="use_sim" default="true" />
+  <xacro:arg name="use_fake_hardware" default="false" />
+  <xacro:arg name="fake_sensor_commands" default="false" />
 
   <xacro:include filename="$(find turtlebot3_lime_description)/gazebo/materials.xacro" />
   <xacro:include filename="$(find turtlebot3_lime_description)/urdf/turtlebot3_bigwheel_orin.urdf.xacro" />
@@ -28,9 +32,9 @@
   <xacro:turtlebot3_lime_system
     name="TurtleBot3LimeGripperTestSystem"
     prefix="$(arg prefix)"
-    use_sim="true"
-    use_fake_hardware="false"
-    fake_sensor_commands="false" />
+    use_sim="$(arg use_sim)"
+    use_fake_hardware="$(arg use_fake_hardware)"
+    fake_sensor_commands="$(arg fake_sensor_commands)" />
 
   <!-- Preserve only passive base contact properties needed for stable settling. -->
   <gazebo reference="$(arg prefix)base_link">
