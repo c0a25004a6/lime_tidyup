@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -eo pipefail
 
 ARTIFACT_DIR="${1:-/artifacts}"
 mkdir -p "${ARTIFACT_DIR}"
@@ -7,6 +7,7 @@ mkdir -p "${ARTIFACT_DIR}"
 source /opt/ros/humble/setup.bash
 source /project/lib_ws/install/setup.bash
 source /root/turtlebot3_ws/install/setup.bash
+set -u
 
 export GAZEBO_MODEL_PATH="${GAZEBO_MODEL_PATH:-}:/root/.gazebo/models:/opt/ros/humble/share/turtlebot3_gazebo/models"
 export GAZEBO_PLUGIN_PATH="${GAZEBO_PLUGIN_PATH:-}:/project/lib_ws/install/IFRA_LinkAttacher/lib:/opt/ros/humble/lib"
