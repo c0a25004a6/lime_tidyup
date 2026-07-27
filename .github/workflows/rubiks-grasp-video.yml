@@ -62,7 +62,7 @@ jobs:
             -v /tmp/.X11-unix:/tmp/.X11-unix \
             -v "$PWD/artifacts:/artifacts" \
             lime-tidyup-rubiks-video:${{ github.sha }} \
-            bash -lc '/root/bin/run_rubiks_cube_settle_video /artifacts' \
+            bash -lc 'bash /root/bin/run_rubiks_cube_settle_video /artifacts' \
             >artifacts/container.log 2>&1 &
           CONTAINER_RUN_PID=$!
 
@@ -121,9 +121,10 @@ jobs:
           print(f'video duration: {duration:.2f}s')
           PY
       - name: Upload video and evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: rubiks-cube-settle-video-evidence
           path: artifacts/
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
