@@ -22,7 +22,9 @@ class SmokeNode(Node):
         self.right_joint = right_joint
         self.started = time.monotonic()
         self.samples: list[dict] = []
-        self.latest: dict[str, float] = {}
+        self.latest: dict[str, float | bool] = {}
+        self.phase = "initial"
+        self.command_target_m: float | None = None
         self.create_subscription(JointState, "/joint_states", self.on_joint_state, 50)
 
     def on_joint_state(self, msg: JointState) -> None:
@@ -31,14 +33,21 @@ class SmokeNode(Node):
             return
         left = float(values[self.left_joint])
         right_value = values.get(self.right_joint)
-        right = float(right_value) if right_value is not None else left
-        self.latest = {"left": left, "right": right}
+        right_observed = right_value is not None
+        right = float(right_value) if right_observed else left
+        self.latest = {
+            "left": left,
+            "right": right,
+            "right_observed": right_observed,
+        }
         separation = abs((0.021 + left) - (-0.021 - right))
         self.samples.append({
             "t_s": time.monotonic() - self.started,
+            "phase": self.phase,
+            "command_target_m": self.command_target_m,
             "left_joint_position_m": left,
             "right_joint_position_m": right,
-            "right_joint_observed": right_value is not None,
+            "right_joint_observed": right_observed,
             "link_frame_separation_m": separation,
             "inner_face_opening_m": None,
         })
@@ -48,15 +57,17 @@ class SmokeNode(Node):
         while rclpy.ok() and time.monotonic() < deadline:
             rclpy.spin_once(self, timeout_sec=0.05)
 
-    def send(self, target: float, max_effort: float, timeout: float) -> dict:
+    def send(self, label: str, target: float, max_effort: float, timeout: float) -> dict:
+        self.phase = label
+        self.command_target_m = target
         if not self.client.wait_for_server(timeout_sec=timeout):
             raise RuntimeError("gripper action server was not available")
         goal = GripperCommand.Goal()
         goal.command.position = target
         goal.command.max_effort = max_effort
         send_future = self.client.send_goal_async(goal)
-        deadline = time.monotonic() + timeout
-        while rclpy.ok() and not send_future.done() and time.monotonic() < deadline:
+        send_deadline = time.monotonic() + timeout
+        while rclpy.ok() and not send_future.done() and time.monotonic() < send_deadline:
             rclpy.spin_once(self, timeout_sec=0.05)
         if not send_future.done():
             raise RuntimeError(f"timed out sending gripper target {target}")
@@ -64,13 +75,15 @@ class SmokeNode(Node):
         if handle is None or not handle.accepted:
             raise RuntimeError(f"gripper target {target} was rejected")
         result_future = handle.get_result_async()
-        while rclpy.ok() and not result_future.done() and time.monotonic() < deadline:
+        result_deadline = time.monotonic() + timeout
+        while rclpy.ok() and not result_future.done() and time.monotonic() < result_deadline:
             rclpy.spin_once(self, timeout_sec=0.05)
         if not result_future.done():
             raise RuntimeError(f"timed out executing gripper target {target}")
         wrapped = result_future.result()
         result = wrapped.result
         return {
+            "label": label,
             "target_position_m": target,
             "result_status": int(wrapped.status),
             "reached_goal": bool(result.reached_goal),
@@ -97,18 +110,23 @@ def main() -> int:
         node.spin_for(1.0)
         if not node.latest:
             raise RuntimeError("gripper joint was not observed on /joint_states")
+        if not bool(node.latest.get("right_observed")):
+            raise RuntimeError("right mimic joint was not observed on /joint_states")
         for label, target in (("open_1", 0.019), ("close", -0.010), ("open_2", 0.019)):
-            started = time.monotonic() - node.started
-            outcome = node.send(target, max_effort=1.0, timeout=args.timeout)
+            command_t = time.monotonic() - node.started
+            outcome = node.send(label, target, max_effort=1.0, timeout=args.timeout)
             node.spin_for(args.hold)
             outcome.update({
-                "label": label,
-                "command_t_s": started,
+                "command_t_s": command_t,
                 "hold_end_t_s": time.monotonic() - node.started,
                 "observed_left_joint_position_m": node.latest.get("left"),
                 "observed_right_joint_position_m": node.latest.get("right"),
+                "right_joint_observed": bool(node.latest.get("right_observed")),
             })
             events.append(outcome)
+        node.phase = "complete"
+        node.command_target_m = None
+        node.spin_for(0.5)
     finally:
         node.destroy_node()
         rclpy.shutdown()
