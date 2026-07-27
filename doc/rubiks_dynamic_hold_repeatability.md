@@ -1,12 +1,12 @@
 # Rubik dynamic supported-hold lateral repeatability
 
-## Current scope
+## Final boundary candidate
 
-This gate repeats the accepted PR #7 dynamic supported close-hold-release trial in three fresh Gazebo processes. The current candidate matrix changes only the Rubik cube's initial lateral Y position relative to `link7`:
+This gate repeats the accepted PR #7 dynamic supported close-hold-release trial in three fresh Gazebo processes. The final passive-alignment boundary candidate changes only the Rubik cube's initial lateral Y position relative to `link7`:
 
-- `-0.00025 m`;
+- `-0.00010 m`;
 - `0.0 m`;
-- `+0.00025 m`.
+- `+0.00010 m`.
 
 The canonical `0.057 m`, `0.09 kg` cube, support surface, gripper effort, close step, hold duration, release duration, calibration, and all acceptance thresholds remain unchanged.
 
@@ -21,11 +21,30 @@ Both offset trials reached independent left/right contact within the bounded ali
 
 The evidence indicates edge or tilted contact and support-climbing motion. Therefore `±0.5 mm` is outside the currently demonstrated passive-alignment envelope.
 
-## Bounded unilateral alignment
+## Rejected ±0.25 mm matrix
+
+The subsequent `-0.00025 / 0.0 / +0.00025 m` candidate was also rejected without changing the PR #7 thresholds.
+
+- `-0.25 mm`: one finger contacted at `close_step_38`; six additional `0.25 mm` alignment steps consumed the full `1.5 mm` allowance without independent contact from the opposite finger;
+- `0.0 mm`: the central control trial passed the original PR #7 conditions, including calibrated opening, support coverage, bilateral hold, reopen clearance, and post-release settling;
+- `+0.25 mm`: bilateral contact was reached after approximately `1.0 mm` additional closing, but the cube subsequently contacted `link7::link7_collision`, lost the accepted side-hold geometry, and became dynamically unstable.
+
+Therefore `±0.25 mm` is also outside the currently demonstrated passive-alignment envelope.
+
+## Bounded unilateral alignment and immediate abort
 
 An offset cube naturally contacts one finger before the other. The initial close sweep still cancels immediately on first contact. If that contact is unilateral, the test may continue closing at the same `0.25` maximum effort and `0.00025 m` step size for at most `0.0015 m` additional travel.
 
-The alignment phase stops as soon as independent left/right contact is observed. A stall, an unreached alignment step, exhaustion of the `1.5 mm` travel bound, calibrated-width disagreement, excessive movement, support loss, or excessive rotation is a hard failure. The bound is test-only and does not alter the production controller or accepted physical thresholds.
+The alignment phase stops as soon as independent left/right contact is observed. During alignment, the trial now aborts immediately if any of the following occurs:
+
+- horizontal cube displacement exceeds `0.003 m`;
+- upward cube displacement exceeds `0.0015 m`;
+- cube rotation exceeds `0.10 rad`;
+- the cube contacts any non-finger robot collision;
+- a command stalls or fails to reach its target;
+- the `1.5 mm` additional travel bound is exhausted.
+
+Calibrated-width disagreement, insufficient support contact, excessive movement during hold, or failed post-release settling remain hard failures. These guards are test-only and do not alter the production controller or accepted physical thresholds.
 
 ## Acceptance
 
@@ -42,4 +61,4 @@ Each trial starts a fresh container and Gazebo process and writes a separate evi
 - no production URDF change;
 - no grasp-success claim.
 
-This gate measures repeatability only. Passing the `±0.25 mm` matrix would not authorize `±0.5 mm`, support removal, or lifting.
+The `±0.10 mm` matrix is the final passive-offset boundary test for this phase. If it fails, further passive narrowing is not considered a meaningful next phase; active pose sensing or centering must be designed before any broader manipulation or lift experiment.
