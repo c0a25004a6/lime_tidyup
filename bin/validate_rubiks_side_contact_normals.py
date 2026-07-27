@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 from pathlib import Path
 import statistics
 
@@ -45,8 +44,14 @@ def main() -> int:
         dual_message_count += 1
         for state in message.get("states", []):
             pair = f"{state.get('collision1', '')} {state.get('collision2', '')}"
-            normals = [[float(value) for value in normal] for normal in state.get("contact_normals", [])]
-            positions = [[float(value) for value in position] for position in state.get("contact_positions_m", [])]
+            normals = [
+                [float(value) for value in normal]
+                for normal in state.get("contact_normals", [])
+            ]
+            positions = [
+                [float(value) for value in position]
+                for position in state.get("contact_positions_m", [])
+            ]
             if "gripper_left_link" in pair:
                 left_normals.extend(normals)
                 left_positions.extend(positions)
@@ -67,27 +72,46 @@ def main() -> int:
         errors.append("no dual-contact messages")
 
     if left and right:
-        for name, metrics, expected_sign in (
+        # Lime's left gripper link occupies the +Y cube side and Gazebo reports
+        # its pair normal inward toward -Y.  The right link is the mirrored case.
+        for name, metrics, expected_normal_sign in (
             ("left", left, -1.0),
             ("right", right, 1.0),
         ):
             mean = metrics["mean_normal_xyz"]
             mean_abs = metrics["mean_abs_normal_xyz"]
-            if expected_sign * float(mean[1]) < 0.75:
-                errors.append(f"{name} Y normal does not point toward its finger: {mean[1]}")
+            if expected_normal_sign * float(mean[1]) < 0.75:
+                errors.append(
+                    f"{name} inward Y normal has the wrong direction: {mean[1]}"
+                )
             if float(mean_abs[1]) <= float(mean_abs[2]):
-                errors.append(f"{name} contact is not side-dominant: |Y|={mean_abs[1]} |Z|={mean_abs[2]}")
+                errors.append(
+                    f"{name} contact is not side-dominant: "
+                    f"|Y|={mean_abs[1]} |Z|={mean_abs[2]}"
+                )
             if float(mean_abs[1]) < 0.75:
-                errors.append(f"{name} lateral normal component is too small: {mean_abs[1]}")
+                errors.append(
+                    f"{name} lateral normal component is too small: {mean_abs[1]}"
+                )
             if float(mean_abs[2]) > 0.65:
-                errors.append(f"{name} vertical normal component is too large: {mean_abs[2]}")
+                errors.append(
+                    f"{name} vertical normal component is too large: {mean_abs[2]}"
+                )
             if float(mean_abs[0]) > 0.10:
-                errors.append(f"{name} depth-axis normal component is too large: {mean_abs[0]}")
+                errors.append(
+                    f"{name} depth-axis normal component is too large: {mean_abs[0]}"
+                )
 
-        if not -0.030 <= float(left["mean_contact_y_m"]) <= -0.027:
-            errors.append(f"left contact is not on the -Y cube side: {left['mean_contact_y_m']}")
-        if not 0.027 <= float(right["mean_contact_y_m"]) <= 0.030:
-            errors.append(f"right contact is not on the +Y cube side: {right['mean_contact_y_m']}")
+        if not 0.027 <= float(left["mean_contact_y_m"]) <= 0.030:
+            errors.append(
+                f"left link contact is not on the +Y cube side: "
+                f"{left['mean_contact_y_m']}"
+            )
+        if not -0.030 <= float(right["mean_contact_y_m"]) <= -0.027:
+            errors.append(
+                f"right link contact is not on the -Y cube side: "
+                f"{right['mean_contact_y_m']}"
+            )
 
     result = {
         "schema_version": 1,
@@ -97,10 +121,19 @@ def main() -> int:
         "dual_contact_message_count": dual_message_count,
         "left": left,
         "right": right,
-        "side_dominance_definition": "mean_abs_y > mean_abs_z, mean_abs_y >= 0.75, mean_abs_z <= 0.65",
+        "lime_finger_to_cube_side": {
+            "gripper_left_link": "+Y cube side; inward pair normal -Y",
+            "gripper_right_link": "-Y cube side; inward pair normal +Y",
+        },
+        "side_dominance_definition": (
+            "mean_abs_y > mean_abs_z, mean_abs_y >= 0.75, "
+            "mean_abs_z <= 0.65"
+        ),
         "raw_gazebo_gui_video": False,
     }
-    Path(args.output).write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    Path(args.output).write_text(
+        json.dumps(result, indent=2) + "\n", encoding="utf-8"
+    )
     print(json.dumps(result, indent=2))
     return 1 if errors else 0
 
