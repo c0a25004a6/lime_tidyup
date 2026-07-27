@@ -1,0 +1,161 @@
+name: Rubik dynamic hold repeatability evidence
+
+on:
+  push:
+    paths:
+      - "bin/run_gazebo_dynamic_supported_hold_variant"
+      - "bin/summarize_rubiks_dynamic_hold_repeatability.py"
+      - "bin/run_gazebo_dynamic_supported_hold"
+      - "bin/run_rubiks_dynamic_supported_hold.py"
+      - "bin/render_rubiks_cube_contact_video.py"
+      - "project/resource/rubiks_dynamic_cube_supported_057.sdf"
+      - "project/resource/rubiks_cube_support_surface.sdf"
+      - "project/resource/turtlebot3_lime_gripper_test.urdf.xacro"
+      - "project/resource/gazebo_gripper_test_controller_manager.yaml"
+      - "project/resource/rubiks_grasp_calibration.world"
+      - "doc/rubiks_dynamic_hold_repeatability.md"
+      - ".github/workflows/rubiks-dynamic-hold-repeatability.yml"
+  pull_request:
+    paths:
+      - "bin/run_gazebo_dynamic_supported_hold_variant"
+      - "bin/summarize_rubiks_dynamic_hold_repeatability.py"
+      - "bin/run_gazebo_dynamic_supported_hold"
+      - "bin/run_rubiks_dynamic_supported_hold.py"
+      - "bin/render_rubiks_cube_contact_video.py"
+      - "project/resource/rubiks_dynamic_cube_supported_057.sdf"
+      - "project/resource/rubiks_cube_support_surface.sdf"
+      - "project/resource/turtlebot3_lime_gripper_test.urdf.xacro"
+      - "project/resource/gazebo_gripper_test_controller_manager.yaml"
+      - "project/resource/rubiks_grasp_calibration.world"
+      - "doc/rubiks_dynamic_hold_repeatability.md"
+      - ".github/workflows/rubiks-dynamic-hold-repeatability.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rubiks-dynamic-hold-repeatability-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dynamic-hold-repeatability-evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate repeatability harness
+        run: |
+          python3 -m py_compile bin/summarize_rubiks_dynamic_hold_repeatability.py
+          bash -n bin/run_gazebo_dynamic_supported_hold_variant
+          python3 - <<'PY'
+          from pathlib import Path
+
+          base = Path('bin/run_gazebo_dynamic_supported_hold').read_text(encoding='utf-8')
+          anchor = "  --cube-y 0.0 \\\n"
+          if base.count(anchor) != 1:
+              raise SystemExit('base supported-hold harness no longer has one cube-y anchor')
+          wrapper = Path('bin/run_gazebo_dynamic_supported_hold_variant').read_text(encoding='utf-8')
+          if 'abs(cube_y) > 0.001' not in wrapper:
+              raise SystemExit('variant runner lacks the 1 mm safety bound')
+          PY
+
+      - name: Install video encoder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Build current Lime simulation image
+        run: docker build -t lime-tidyup-dynamic-repeatability:${{ github.sha }} .
+
+      - name: Run three fresh supported-hold trials
+        run: |
+          set -u
+          mkdir -p artifacts
+          trials=(
+            "minus_0p5mm|-0.0005|41"
+            "center|0.0|42"
+            "plus_0p5mm|0.0005|43"
+          )
+          for specification in "${trials[@]}"; do
+            IFS='|' read -r label cube_y domain_id <<<"${specification}"
+            trial_dir="$PWD/artifacts/${label}"
+            mkdir -p "${trial_dir}"
+            cp project/resource/rubiks_dynamic_cube_supported_057.sdf "${trial_dir}/"
+            cp project/resource/rubiks_cube_support_surface.sdf "${trial_dir}/"
+            printf '%s\n' "${cube_y}" >"${trial_dir}/requested_cube_y_m.txt"
+            printf '%s\n' "${domain_id}" >"${trial_dir}/ros_domain_id.txt"
+
+            set +e
+            docker run --rm --network host \
+              -e ROS_DOMAIN_ID="${domain_id}" \
+              -v "${trial_dir}:/artifacts" \
+              lime-tidyup-dynamic-repeatability:${{ github.sha }} \
+              bash -lc "bash /root/bin/run_gazebo_dynamic_supported_hold_variant /artifacts '${cube_y}'" \
+              >"${trial_dir}/matrix_container.stdout.log" \
+              2>"${trial_dir}/matrix_container.stderr.log"
+            trial_status=$?
+            set -e
+            printf '%s\n' "${trial_status}" >"${trial_dir}/trial_exit_status.txt"
+
+            if [[ -s "${trial_dir}/rubiks_dynamic_supported_hold_telemetry.json" ]]; then
+              set +e
+              python3 bin/render_rubiks_cube_contact_video.py \
+                --telemetry "${trial_dir}/rubiks_dynamic_supported_hold_telemetry.json" \
+                --output "${trial_dir}/rubiks_dynamic_supported_hold_telemetry_evidence.mp4" \
+                >"${trial_dir}/video_render.stdout.log" \
+                2>"${trial_dir}/video_render.stderr.log"
+              render_status=$?
+              set -e
+              printf '%s\n' "${render_status}" >"${trial_dir}/video_render_exit_status.txt"
+              if [[ ${render_status} -eq 0 ]]; then
+                ffprobe -v error -show_entries format=duration,size \
+                  -of json "${trial_dir}/rubiks_dynamic_supported_hold_telemetry_evidence.mp4" \
+                  >"${trial_dir}/rubiks_dynamic_supported_hold_telemetry_evidence.ffprobe.json"
+              fi
+            fi
+            sleep 2
+          done
+
+      - name: Aggregate repeatability evidence
+        run: |
+          python3 bin/summarize_rubiks_dynamic_hold_repeatability.py \
+            --root artifacts \
+            --output artifacts/rubiks_dynamic_hold_repeatability_summary.json \
+            --manifest artifacts/rubiks_dynamic_hold_repeatability_evidence.manifest.json
+
+      - name: Validate aggregate safety boundary
+        run: |
+          test -s artifacts/rubiks_dynamic_hold_repeatability_summary.json
+          test -s artifacts/rubiks_dynamic_hold_repeatability_evidence.manifest.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          summary = json.loads(Path('artifacts/rubiks_dynamic_hold_repeatability_summary.json').read_text())
+          if summary.get('passed') is not True:
+              raise SystemExit(summary.get('errors'))
+          if int(summary.get('trial_count', 0)) != 3:
+              raise SystemExit('repeatability gate did not contain exactly three trials')
+          if not all(trial.get('passed') is True for trial in summary.get('trials', [])):
+              raise SystemExit('one or more repeatability trials did not pass')
+          if summary.get('offsets_m') != [-0.0005, 0.0, 0.0005]:
+              raise SystemExit('unexpected repeatability offset matrix')
+          for key in (
+              'arm_motion_performed', 'lift_command_sent', 'support_removed',
+              'ifra_attachment_used', 'grasp_success_claimed',
+          ):
+              if summary.get(key) is not False:
+                  raise SystemExit(f'{key} must remain false')
+          print(json.dumps(summary, indent=2))
+          PY
+
+      - name: Upload repeatability evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-dynamic-hold-repeatability-evidence
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
