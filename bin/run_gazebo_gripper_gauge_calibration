@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ARTIFACT_DIR="${1:-/artifacts}"
+mkdir -p "${ARTIFACT_DIR}"
+
+source /opt/ros/humble/setup.bash
+source /project/lib_ws/install/setup.bash
+source /root/turtlebot3_ws/install/setup.bash
+
+export GAZEBO_MODEL_PATH="${GAZEBO_MODEL_PATH:-}:/root/.gazebo/models:/opt/ros/humble/share/turtlebot3_gazebo/models"
+export GAZEBO_PLUGIN_PATH="${GAZEBO_PLUGIN_PATH:-}:/project/lib_ws/install/IFRA_LinkAttacher/lib:/opt/ros/humble/lib"
+
+MODEL_NAME="turtlebot3_lime_gripper_test"
+URDF_PATH="${ARTIFACT_DIR}/turtlebot3_lime_gripper_test.urdf"
+SERVER_LOG="${ARTIFACT_DIR}/gazebo_gauge_calibration.gzserver.log"
+RSP_LOG="${ARTIFACT_DIR}/gazebo_gauge_calibration.robot_state_publisher.log"
+TELEMETRY="${ARTIFACT_DIR}/gazebo_gauge_calibration_telemetry.json"
+
+cleanup() {
+  status=$?
+  for pid in "${GZSERVER_PID:-}" "${RSP_PID:-}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+      kill -INT "${pid}" 2>/dev/null || true
+    fi
+  done
+  sleep 2
+  for pid in "${GZSERVER_PID:-}" "${RSP_PID:-}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+      kill -TERM "${pid}" 2>/dev/null || true
+      wait "${pid}" 2>/dev/null || true
+    fi
+  done
+  exit "${status}"
+}
+trap cleanup EXIT INT TERM
+
+BUMPER_PLUGIN="$(find /opt/ros/humble/lib -name libgazebo_ros_bumper.so -print -quit)"
+test -n "${BUMPER_PLUGIN}"
+printf '%s\n' "${BUMPER_PLUGIN}" >"${ARTIFACT_DIR}/gazebo_gauge_calibration.bumper_plugin.txt"
+
+xacro /project/resource/turtlebot3_lime_gripper_test.urdf.xacro >"${URDF_PATH}"
+grep -q 'libgazebo_ros2_control.so' "${URDF_PATH}"
+! grep -q 'libgazebo_grasp_fix.so' "${URDF_PATH}"
+! grep -q 'librealsense_gazebo_plugin.so' "${URDF_PATH}"
+! grep -q 'libgazebo_ros_diff_drive.so' "${URDF_PATH}"
+! grep -q 'libgazebo_ros_ray_sensor.so' "${URDF_PATH}"
+
+ros2 run robot_state_publisher robot_state_publisher "${URDF_PATH}" \
+  --ros-args -p use_sim_time:=true \
+  >"${RSP_LOG}" 2>&1 &
+RSP_PID=$!
+
+for _ in $(seq 1 30); do
+  ros2 service list 2>/dev/null | grep -qx '/robot_state_publisher/get_parameters' && break
+  kill -0 "${RSP_PID}" 2>/dev/null || { cat "${RSP_LOG}"; exit 2; }
+  sleep 1
+done
+ros2 service list | grep -qx '/robot_state_publisher/get_parameters'
+
+gzserver /project/resource/rubiks_grasp_calibration.world \
+  -s libgazebo_ros_init.so \
+  -s libgazebo_ros_factory.so \
+  >"${SERVER_LOG}" 2>&1 &
+GZSERVER_PID=$!
+
+for _ in $(seq 1 90); do
+  ros2 service list 2>/dev/null | grep -qx '/spawn_entity' && break
+  kill -0 "${GZSERVER_PID}" 2>/dev/null || { cat "${SERVER_LOG}"; exit 3; }
+  sleep 1
+done
+ros2 service list | grep -qx '/spawn_entity'
+
+ros2 run gazebo_ros spawn_entity.py \
+  -entity "${MODEL_NAME}" \
+  -file "${URDF_PATH}" \
+  -x 0.0 -y 0.0 -z 0.03 -Y 0.0 \
+  >"${ARTIFACT_DIR}/gazebo_gauge_calibration.robot_spawn.log" 2>&1
+
+for _ in $(seq 1 90); do
+  ros2 service list 2>/dev/null | grep -qx '/controller_manager/list_controllers' && break
+  kill -0 "${GZSERVER_PID}" 2>/dev/null || { cat "${SERVER_LOG}"; exit 4; }
+  sleep 1
+done
+ros2 service list | grep -qx '/controller_manager/list_controllers'
+
+ros2 run controller_manager spawner joint_state_broadcaster \
+  --controller-manager /controller_manager \
+  >"${ARTIFACT_DIR}/gauge_joint_state_broadcaster.spawner.log" 2>&1
+ros2 run controller_manager spawner gripper_controller \
+  --controller-manager /controller_manager \
+  >"${ARTIFACT_DIR}/gauge_gripper_controller.spawner.log" 2>&1
+
+for _ in $(seq 1 60); do
+  ros2 action list 2>/dev/null | grep -qx '/gripper_controller/gripper_cmd' && break
+  sleep 1
+done
+ros2 action list | grep -qx '/gripper_controller/gripper_cmd'
+
+sleep 3
+ros2 topic list >"${ARTIFACT_DIR}/gazebo_gauge_calibration.topics_before.txt"
+gz topic -l >"${ARTIFACT_DIR}/gazebo_gauge_calibration.gz_topics_before.txt" 2>&1 || true
+ros2 control list_hardware_interfaces \
+  >"${ARTIFACT_DIR}/gazebo_gauge_calibration.hardware_interfaces.txt" 2>&1 || true
+
+set +e
+python3 /root/bin/run_gripper_gauge_calibration.py \
+  --gauge-sdf /project/resource/rubiks_static_gauge_057.sdf \
+  --gauge-width 0.057 \
+  --reference-frame "${MODEL_NAME}::link7" \
+  --gauge-x -0.019 \
+  --gauge-y 0.0 \
+  --gauge-z 0.1007 \
+  --close-start 0.0185 \
+  --close-stop 0.0130 \
+  --close-step 0.00025 \
+  --step-hold 0.12 \
+  --max-effort 0.25 \
+  --timeout 8.0 \
+  --output "${TELEMETRY}" \
+  >"${ARTIFACT_DIR}/gazebo_gauge_calibration.stdout.json" \
+  2>"${ARTIFACT_DIR}/gazebo_gauge_calibration.stderr.log"
+CALIBRATION_STATUS=$?
+set -e
+
+ros2 topic list >"${ARTIFACT_DIR}/gazebo_gauge_calibration.topics_after.txt" || true
+timeout 5 ros2 topic echo --once /rubiks_gauge/contact_states \
+  >"${ARTIFACT_DIR}/gazebo_gauge_calibration.contact_states_after.yaml" 2>&1 || true
+
+python3 - "${ARTIFACT_DIR}" "${CALIBRATION_STATUS}" <<'PY'
+from __future__ import annotations
+
+import json
+import math
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+process_status = int(sys.argv[2])
+telemetry_path = root / "gazebo_gauge_calibration_telemetry.json"
+errors: list[str] = []
+if not telemetry_path.is_file():
+    raise SystemExit("calibration telemetry was not written")
+data = json.loads(telemetry_path.read_text(encoding="utf-8"))
+errors.extend(str(error) for error in data.get("errors", []))
+
+if process_status != 0 and not errors:
+    errors.append(f"calibration process exited with status {process_status}")
+if data.get("trial_type") != "gazebo_static_gauge_inner_face_calibration":
+    errors.append("unexpected trial_type")
+if data.get("hardware_backend") != "gazebo_ros2_control":
+    errors.append("unexpected hardware backend")
+if not math.isclose(float(data.get("gauge_width_m", -1)), 0.057, abs_tol=1e-9):
+    errors.append("gauge width is not 57 mm")
+for key in (
+    "gauge_spawned",
+    "gauge_contact_observed",
+    "left_gauge_contact_observed",
+    "right_gauge_contact_observed",
+    "dual_gauge_contact_observed",
+    "contact_cleared_after_reopen",
+    "inner_face_opening_calibrated",
+):
+    if data.get(key) is not True:
+        errors.append(f"{key} must be true")
+if data.get("initial_open_contact") is not False:
+    errors.append("gauge must not contact the fingers at full open")
+for key in ("cube_spawned", "cube_contact", "ifra_attachment_used", "grasp_success_claimed"):
+    if data.get(key) is not False:
+        errors.append(f"{key} must remain false")
+
+calibration = data.get("calibration") or {}
+offset = calibration.get("combined_inner_face_offset_m")
+if offset is None or not 0.008 <= float(offset) <= 0.030:
+    errors.append(f"combined inner-face offset is implausible: {offset}")
+open_width = calibration.get("predicted_open_inner_face_opening_m")
+closed_width = calibration.get("predicted_closed_inner_face_opening_m")
+if open_width is None or not 0.057 < float(open_width) < 0.072:
+    errors.append(f"unexpected calibrated full-open width: {open_width}")
+if closed_width is None or not -0.005 < float(closed_width) < 0.018:
+    errors.append(f"unexpected calibrated full-closed width: {closed_width}")
+if int(calibration.get("dual_contact_sample_count", 0)) < 1:
+    errors.append("no dual-contact calibration samples")
+if float(calibration.get("estimated_uncertainty_m", 1.0)) > 0.003:
+    errors.append("calibration uncertainty exceeds 3 mm")
+
+base_displacement = data.get("robot_base_displacement_m")
+final_speed = data.get("robot_final_linear_speed_m_s")
+if base_displacement is None or float(base_displacement) > 0.05:
+    errors.append(f"robot base displacement too large: {base_displacement}")
+if final_speed is None or float(final_speed) > 0.05:
+    errors.append(f"robot final speed too high: {final_speed}")
+
+samples = data.get("samples", [])
+contacts = data.get("contact_messages", [])
+if len(samples) < 50:
+    errors.append(f"insufficient joint/link samples: {len(samples)}")
+if not contacts:
+    errors.append("contact message evidence is empty")
+if data.get("inner_face_opening_calibrated") is True and any(
+    sample.get("inner_face_opening_m") is None for sample in samples
+    if sample.get("link_frame_separation_m") is not None
+):
+    errors.append("calibrated samples contain a missing inner-face opening")
+
+summary = {
+    "schema_version": 1,
+    "trial_type": data.get("trial_type"),
+    "hardware_backend": data.get("hardware_backend"),
+    "passed": not errors,
+    "errors": errors,
+    "process_status": process_status,
+    "sample_count": len(samples),
+    "contact_message_count": len(contacts),
+    "event_labels": [event.get("label") for event in data.get("events", [])],
+    "gauge_width_m": data.get("gauge_width_m"),
+    "gauge_pose_relative_to": data.get("gauge_pose_relative_to"),
+    "gauge_pose_xyz_m": data.get("gauge_pose_xyz_m"),
+    "initial_open_contact": data.get("initial_open_contact"),
+    "left_gauge_contact_observed": data.get("left_gauge_contact_observed"),
+    "right_gauge_contact_observed": data.get("right_gauge_contact_observed"),
+    "dual_gauge_contact_observed": data.get("dual_gauge_contact_observed"),
+    "contact_cleared_after_reopen": data.get("contact_cleared_after_reopen"),
+    "inner_face_opening_calibrated": data.get("inner_face_opening_calibrated"),
+    "calibration": calibration,
+    "robot_base_displacement_m": base_displacement,
+    "robot_final_linear_speed_m_s": final_speed,
+    "cube_spawned": False,
+    "cube_contact": False,
+    "ifra_attachment_used": False,
+    "grasp_success_claimed": False,
+}
+(root / "gazebo_gauge_calibration_summary.json").write_text(
+    json.dumps(summary, indent=2) + "\n", encoding="utf-8"
+)
+manifest = {
+    "schema_version": 1,
+    "evidence_type": "gazebo_static_gauge_inner_face_calibration",
+    "source": (
+        "Gazebo Classic contact sensor, gazebo_ros2_control, GripperCommand, "
+        "/joint_states, /link_states, /model_states, and /rubiks_gauge/contact_states"
+    ),
+    "gauge_width_m": 0.057,
+    "calibration_formula": calibration.get("formula"),
+    "production_urdf_modified": False,
+    "cube_spawned": False,
+    "cube_contact": False,
+    "ifra_attachment_used": False,
+    "grasp_success_claimed": False,
+    "review_required": True,
+    "files": {
+        "expanded_urdf": "turtlebot3_lime_gripper_test.urdf",
+        "gauge_sdf": "rubiks_static_gauge_057.sdf",
+        "telemetry": telemetry_path.name,
+        "summary": "gazebo_gauge_calibration_summary.json",
+        "video": "gazebo_gauge_calibration_telemetry_evidence.mp4",
+    },
+}
+(root / "gazebo_gauge_calibration_evidence.manifest.json").write_text(
+    json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+)
+print(json.dumps(summary, indent=2))
+if errors:
+    raise SystemExit("; ".join(errors))
+PY
