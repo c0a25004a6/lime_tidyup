@@ -172,13 +172,13 @@ for key in ("cube_spawned", "cube_contact", "ifra_attachment_used", "grasp_succe
 
 calibration = data.get("calibration") or {}
 offset = calibration.get("combined_inner_face_offset_m")
-if offset is None or not 0.008 <= float(offset) <= 0.030:
+if offset is None or not 0.001 <= float(offset) <= 0.010:
     errors.append(f"combined inner-face offset is implausible: {offset}")
 open_width = calibration.get("predicted_open_inner_face_opening_m")
 closed_width = calibration.get("predicted_closed_inner_face_opening_m")
-if open_width is None or not 0.057 < float(open_width) < 0.072:
+if open_width is None or not 0.070 <= float(open_width) <= 0.080:
     errors.append(f"unexpected calibrated full-open width: {open_width}")
-if closed_width is None or not -0.005 < float(closed_width) < 0.018:
+if closed_width is None or not 0.010 <= float(closed_width) <= 0.022:
     errors.append(f"unexpected calibrated full-closed width: {closed_width}")
 if int(calibration.get("dual_contact_sample_count", 0)) < 1:
     errors.append("no dual-contact calibration samples")
