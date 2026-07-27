@@ -36,23 +36,18 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-ros2_graph_contains() {
-  local graph_kind="$1"
-  local expected="$2"
+ros2_service_available() {
+  local service_type
+  service_type="$(timeout 5 ros2 service type "$1" 2>/dev/null)" || return 1
+  [[ -n "${service_type}" ]]
+}
+
+ros2_action_available() {
   local output
-  case "${graph_kind}" in
-    service)
-      output="$(ros2 service list 2>/dev/null)" || return 1
-      ;;
-    action)
-      output="$(ros2 action list 2>/dev/null)" || return 1
-      ;;
-    *)
-      printf 'unsupported ROS graph kind: %s\n' "${graph_kind}" >&2
-      return 2
-      ;;
-  esac
-  grep -Fx "${expected}" <<<"${output}" >/dev/null
+  local padded
+  output="$(timeout 5 ros2 action list 2>/dev/null)" || return 1
+  padded=$'\n'"${output}"$'\n'
+  [[ "${padded}" == *$'\n'"$1"$'\n'* ]]
 }
 
 BUMPER_PLUGIN="$(find /opt/ros/humble/lib -name libgazebo_ros_bumper.so -print -quit)"
@@ -70,15 +65,11 @@ ros2 run robot_state_publisher robot_state_publisher "${URDF_PATH}" \
   --ros-args -p use_sim_time:=true \
   >"${RSP_LOG}" 2>&1 &
 RSP_PID=$!
-
-for _ in $(seq 1 30); do
-  if ros2_graph_contains service '/robot_state_publisher/get_parameters'; then
-    break
-  fi
-  kill -0 "${RSP_PID}" 2>/dev/null || { cat "${RSP_LOG}"; exit 2; }
-  sleep 1
-done
-ros2_graph_contains service '/robot_state_publisher/get_parameters'
+sleep 2
+if ! kill -0 "${RSP_PID}" 2>/dev/null; then
+  cat "${RSP_LOG}"
+  exit 2
+fi
 
 gzserver /project/resource/rubiks_grasp_calibration.world \
   -s libgazebo_ros_init.so \
@@ -87,13 +78,17 @@ gzserver /project/resource/rubiks_grasp_calibration.world \
 GZSERVER_PID=$!
 
 for _ in $(seq 1 90); do
-  if ros2_graph_contains service '/spawn_entity'; then
+  if ros2_service_available '/spawn_entity'; then
     break
   fi
   kill -0 "${GZSERVER_PID}" 2>/dev/null || { cat "${SERVER_LOG}"; exit 3; }
   sleep 1
 done
-ros2_graph_contains service '/spawn_entity'
+if ! ros2_service_available '/spawn_entity'; then
+  ros2 service list >"${ARTIFACT_DIR}/rubiks_static_cube_contact.services_spawn_failure.txt" 2>&1 || true
+  cat "${SERVER_LOG}"
+  exit 3
+fi
 
 ros2 run gazebo_ros spawn_entity.py \
   -entity "${MODEL_NAME}" \
@@ -102,13 +97,17 @@ ros2 run gazebo_ros spawn_entity.py \
   >"${ARTIFACT_DIR}/rubiks_static_cube_contact.robot_spawn.log" 2>&1
 
 for _ in $(seq 1 90); do
-  if ros2_graph_contains service '/controller_manager/list_controllers'; then
+  if ros2_service_available '/controller_manager/list_controllers'; then
     break
   fi
   kill -0 "${GZSERVER_PID}" 2>/dev/null || { cat "${SERVER_LOG}"; exit 4; }
   sleep 1
 done
-ros2_graph_contains service '/controller_manager/list_controllers'
+if ! ros2_service_available '/controller_manager/list_controllers'; then
+  ros2 service list >"${ARTIFACT_DIR}/rubiks_static_cube_contact.services_controller_failure.txt" 2>&1 || true
+  cat "${SERVER_LOG}"
+  exit 4
+fi
 
 ros2 run controller_manager spawner joint_state_broadcaster \
   --controller-manager /controller_manager \
@@ -118,12 +117,15 @@ ros2 run controller_manager spawner gripper_controller \
   >"${ARTIFACT_DIR}/static_cube_gripper_controller.spawner.log" 2>&1
 
 for _ in $(seq 1 60); do
-  if ros2_graph_contains action '/gripper_controller/gripper_cmd'; then
+  if ros2_action_available '/gripper_controller/gripper_cmd'; then
     break
   fi
   sleep 1
 done
-ros2_graph_contains action '/gripper_controller/gripper_cmd'
+if ! ros2_action_available '/gripper_controller/gripper_cmd'; then
+  ros2 action list >"${ARTIFACT_DIR}/rubiks_static_cube_contact.actions_failure.txt" 2>&1 || true
+  exit 5
+fi
 
 sleep 3
 ros2 topic list >"${ARTIFACT_DIR}/rubiks_static_cube_contact.topics_before.txt"
