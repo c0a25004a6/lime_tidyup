@@ -34,13 +34,17 @@ shell_text = base_shell.read_text(encoding="utf-8")
 cube_y_anchor = "  --cube-y 0.0 \\\n"
 if shell_text.count(cube_y_anchor) != 1:
     raise SystemExit("base supported-hold harness no longer has the expected cube-y anchor")
-python_path_anchor = "/root/bin/run_rubiks_dynamic_supported_hold.py"
-if shell_text.count(python_path_anchor) != 1:
+python_command_anchor = "python3 /root/bin/run_rubiks_dynamic_supported_hold.py"
+if shell_text.count(python_command_anchor) != 1:
     raise SystemExit("base supported-hold harness no longer has one Python runner anchor")
 shell_text = shell_text.replace(
     cube_y_anchor, f"  --cube-y {cube_y:.6f} \\\n", 1
 )
-shell_text = shell_text.replace(python_path_anchor, str(temp_python), 1)
+shell_text = shell_text.replace(
+    python_command_anchor,
+    f"PYTHONPATH=/root/bin python3 {temp_python}",
+    1,
+)
 temp_shell.write_text(shell_text, encoding="utf-8")
 temp_shell.chmod(0o755)
 
