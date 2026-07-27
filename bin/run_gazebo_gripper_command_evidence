@@ -1,0 +1,241 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+ARTIFACT_DIR="${1:-/artifacts}"
+mkdir -p "${ARTIFACT_DIR}"
+
+source /opt/ros/humble/setup.bash
+source /project/lib_ws/install/setup.bash
+source /root/turtlebot3_ws/install/setup.bash
+set -u
+
+export GAZEBO_MODEL_PATH="${GAZEBO_MODEL_PATH:-}:/root/.gazebo/models:/opt/ros/humble/share/turtlebot3_gazebo/models"
+export GAZEBO_PLUGIN_PATH="${GAZEBO_PLUGIN_PATH:-}:/project/lib_ws/install/IFRA_LinkAttacher/lib:/opt/ros/humble/lib"
+
+MODEL_NAME="turtlebot3_lime_gripper_test"
+URDF_PATH="${ARTIFACT_DIR}/turtlebot3_lime_gripper_test.urdf"
+SERVER_LOG="${ARTIFACT_DIR}/gazebo_gripper_command.gzserver.log"
+
+cleanup() {
+  status=$?
+  if [[ -n "${GZSERVER_PID:-}" ]] && kill -0 "${GZSERVER_PID}" 2>/dev/null; then
+    kill -INT "${GZSERVER_PID}" 2>/dev/null || true
+    sleep 2
+    kill -TERM "${GZSERVER_PID}" 2>/dev/null || true
+    wait "${GZSERVER_PID}" 2>/dev/null || true
+  fi
+  exit "${status}"
+}
+trap cleanup EXIT INT TERM
+
+xacro /project/resource/turtlebot3_lime_gripper_test.urdf.xacro >"${URDF_PATH}"
+
+grep -q 'libgazebo_ros2_control.so' "${URDF_PATH}"
+! grep -q 'libgazebo_grasp_fix.so' "${URDF_PATH}"
+! grep -q 'librealsense_gazebo_plugin.so' "${URDF_PATH}"
+! grep -q 'libgazebo_ros_diff_drive.so' "${URDF_PATH}"
+! grep -q 'libgazebo_ros_ray_sensor.so' "${URDF_PATH}"
+! grep -q 'cameracolor\|cameradepth\|cameraired\|lds_lfcd_sensor' "${URDF_PATH}"
+
+gzserver /project/resource/rubiks_grasp_calibration.world \
+  -s libgazebo_ros_init.so \
+  -s libgazebo_ros_factory.so \
+  >"${SERVER_LOG}" 2>&1 &
+GZSERVER_PID=$!
+
+for _ in $(seq 1 90); do
+  ros2 service list 2>/dev/null | grep -qx '/spawn_entity' && break
+  kill -0 "${GZSERVER_PID}" 2>/dev/null || {
+    cat "${SERVER_LOG}"
+    exit 2
+  }
+  sleep 1
+done
+ros2 service list | grep -qx '/spawn_entity'
+
+ros2 run gazebo_ros spawn_entity.py \
+  -entity "${MODEL_NAME}" \
+  -file "${URDF_PATH}" \
+  -x 0.0 -y 0.0 -z 0.03 -Y 0.0 \
+  >"${ARTIFACT_DIR}/gazebo_gripper_command.spawn.log" 2>&1
+
+for _ in $(seq 1 90); do
+  ros2 service list 2>/dev/null | grep -qx '/controller_manager/list_controllers' && break
+  kill -0 "${GZSERVER_PID}" 2>/dev/null || {
+    cat "${SERVER_LOG}"
+    exit 3
+  }
+  sleep 1
+done
+ros2 service list | grep -qx '/controller_manager/list_controllers'
+
+ros2 run controller_manager spawner joint_state_broadcaster \
+  --controller-manager /controller_manager \
+  >"${ARTIFACT_DIR}/joint_state_broadcaster.spawner.log" 2>&1
+ros2 run controller_manager spawner gripper_controller \
+  --controller-manager /controller_manager \
+  >"${ARTIFACT_DIR}/gripper_controller.spawner.log" 2>&1
+
+for _ in $(seq 1 60); do
+  ros2 action list 2>/dev/null | grep -qx '/gripper_controller/gripper_cmd' && break
+  sleep 1
+done
+ros2 action list | grep -qx '/gripper_controller/gripper_cmd'
+
+# Let the spawned body settle before taking the initial stability reference.
+sleep 3
+
+python3 /root/bin/run_gripper_command_smoke.py \
+  --trial-type gazebo_ros2_control_gripper_command_smoke \
+  --hardware-backend gazebo_ros2_control \
+  --model-name "${MODEL_NAME}" \
+  --hold 1.5 \
+  --timeout 20.0 \
+  --output "${ARTIFACT_DIR}/gazebo_gripper_command_telemetry.json" \
+  >"${ARTIFACT_DIR}/gazebo_gripper_command_smoke.stdout.json" \
+  2>"${ARTIFACT_DIR}/gazebo_gripper_command_smoke.stderr.log"
+
+python3 - "${ARTIFACT_DIR}" <<'PY'
+from __future__ import annotations
+
+import json
+import math
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+telemetry_path = root / "gazebo_gripper_command_telemetry.json"
+data = json.loads(telemetry_path.read_text(encoding="utf-8"))
+expected = [("open_1", 0.019), ("close", -0.010), ("open_2", 0.019)]
+errors: list[str] = []
+events = data.get("events", [])
+samples = data.get("samples", [])
+model_samples = data.get("model_state_samples", [])
+
+if data.get("trial_type") != "gazebo_ros2_control_gripper_command_smoke":
+    errors.append("unexpected trial_type")
+if data.get("hardware_backend") != "gazebo_ros2_control":
+    errors.append("unexpected hardware backend")
+if data.get("model_state_observed") is not True:
+    errors.append("Gazebo model state was not observed")
+if data.get("inner_face_opening_calibrated") is not False:
+    errors.append("inner-face opening must remain uncalibrated")
+if data.get("cube_contact") is not False:
+    errors.append("cube contact must remain false")
+if data.get("grasp_success_claimed") is not False:
+    errors.append("grasp success must not be claimed")
+if len(events) != 3:
+    errors.append(f"expected 3 events, got {len(events)}")
+if len(samples) < 20:
+    errors.append(f"insufficient joint samples: {len(samples)}")
+if len(model_samples) < 20:
+    errors.append(f"insufficient model-state samples: {len(model_samples)}")
+
+for event, (label, target) in zip(events, expected):
+    if event.get("label") != label:
+        errors.append(f"event label mismatch: {event.get('label')} != {label}")
+    if not math.isclose(float(event.get("target_position_m", 999)), target, abs_tol=1e-9):
+        errors.append(f"{label}: target mismatch")
+    if event.get("reached_goal") is not True:
+        errors.append(f"{label}: action did not reach goal")
+    if event.get("stalled") is not False:
+        errors.append(f"{label}: action stalled")
+    if event.get("right_joint_observed") is not True:
+        errors.append(f"{label}: right joint missing")
+    left = float(event.get("observed_left_joint_position_m", 999))
+    right = float(event.get("observed_right_joint_position_m", 999))
+    if not math.isclose(left, target, abs_tol=0.0015):
+        errors.append(f"{label}: left observed {left} does not match {target}")
+    if not math.isclose(right, target, abs_tol=0.0015):
+        errors.append(f"{label}: right observed {right} does not match {target}")
+    if not math.isclose(left, right, abs_tol=0.0005):
+        errors.append(f"{label}: mimic mismatch left={left} right={right}")
+
+right_observed_all = all(bool(sample.get("right_joint_observed")) for sample in samples)
+if not right_observed_all:
+    errors.append("right mimic joint missing in one or more samples")
+if any(sample.get("inner_face_opening_m") is not None for sample in samples):
+    errors.append("inner-face opening must remain null")
+
+separations = [float(sample["link_frame_separation_m"]) for sample in samples]
+left_positions = [float(sample["left_joint_position_m"]) for sample in samples]
+right_positions = [float(sample["right_joint_position_m"]) for sample in samples]
+if separations and not 0.020 <= min(separations) <= 0.024:
+    errors.append(f"unexpected closed separation: {min(separations)}")
+if separations and not 0.078 <= max(separations) <= 0.082:
+    errors.append(f"unexpected open separation: {max(separations)}")
+
+initial = data.get("initial_model_state")
+final = data.get("final_model_state")
+base_displacement = None
+final_linear_speed = None
+max_linear_speed = None
+if not initial or not final:
+    errors.append("initial/final model state missing")
+else:
+    base_displacement = math.dist(initial["position_m"], final["position_m"])
+    final_linear_speed = math.sqrt(sum(float(v) ** 2 for v in final["linear_velocity_m_s"]))
+    max_linear_speed = max(
+        math.sqrt(sum(float(v) ** 2 for v in sample["linear_velocity_m_s"]))
+        for sample in model_samples
+    )
+    if base_displacement > 0.05:
+        errors.append(f"robot base displaced too far: {base_displacement}")
+    if final_linear_speed > 0.05:
+        errors.append(f"robot did not settle: final speed {final_linear_speed}")
+
+summary = {
+    "schema_version": 1,
+    "trial_type": data.get("trial_type"),
+    "hardware_backend": data.get("hardware_backend"),
+    "passed": not errors,
+    "errors": errors,
+    "sample_count": len(samples),
+    "model_state_sample_count": len(model_samples),
+    "duration_s": float(samples[-1]["t_s"]) if samples else 0.0,
+    "event_labels": [event.get("label") for event in events],
+    "left_joint_min_m": min(left_positions) if left_positions else None,
+    "left_joint_max_m": max(left_positions) if left_positions else None,
+    "right_joint_min_m": min(right_positions) if right_positions else None,
+    "right_joint_max_m": max(right_positions) if right_positions else None,
+    "link_frame_separation_min_m": min(separations) if separations else None,
+    "link_frame_separation_max_m": max(separations) if separations else None,
+    "right_joint_observed_all_samples": right_observed_all,
+    "robot_base_displacement_m": base_displacement,
+    "robot_final_linear_speed_m_s": final_linear_speed,
+    "robot_max_linear_speed_m_s": max_linear_speed,
+    "sensor_plugins_present": False,
+    "grasp_fix_present": False,
+    "cube_spawned": False,
+    "cube_contact": False,
+    "inner_face_opening_calibrated": False,
+    "grasp_success_claimed": False,
+}
+(root / "gazebo_gripper_command_summary.json").write_text(
+    json.dumps(summary, indent=2) + "\n", encoding="utf-8"
+)
+manifest = {
+    "schema_version": 1,
+    "evidence_type": "gazebo_ros2_control_gripper_open_close_open",
+    "source": "Gazebo Classic physics, gazebo_ros2_control, GripperCommand, /joint_states, and /model_states",
+    "robot_environment": "sensor-free test Xacro in headless Gazebo",
+    "production_urdf_modified": False,
+    "cube_spawned": False,
+    "cube_contact": False,
+    "inner_face_opening_calibrated": False,
+    "grasp_success_claimed": False,
+    "review_required": True,
+    "files": {
+        "expanded_urdf": "turtlebot3_lime_gripper_test.urdf",
+        "telemetry": telemetry_path.name,
+        "summary": "gazebo_gripper_command_summary.json",
+        "video": "gazebo_gripper_command_telemetry_evidence.mp4",
+    },
+}
+(root / "gazebo_gripper_command_evidence.manifest.json").write_text(
+    json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+)
+print(json.dumps(summary, indent=2))
+if errors:
+    raise SystemExit("; ".join(errors))
+PY
