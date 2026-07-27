@@ -46,7 +46,7 @@ jobs:
           Xvfb :99 -screen 0 1280x720x24 -ac +extension GLX +render -noreset \
             >artifacts/xvfb.log 2>&1 &
           XVFB_PID=$!
-          openbox --display :99 >artifacts/openbox.log 2>&1 &
+          DISPLAY=:99 openbox >artifacts/openbox.log 2>&1 &
           OPENBOX_PID=$!
           cleanup() {
             docker rm -f rubiks-cube-settle-video >/dev/null 2>&1 || true
