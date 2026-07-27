@@ -113,7 +113,7 @@ python3 /root/bin/run_gripper_gauge_calibration.py \
   --gauge-y 0.0 \
   --gauge-z 0.1007 \
   --close-start 0.0185 \
-  --close-stop 0.0130 \
+  --close-stop 0.0060 \
   --close-step 0.00025 \
   --step-hold 0.12 \
   --max-effort 0.25 \
