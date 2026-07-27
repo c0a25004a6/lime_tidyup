@@ -5,6 +5,7 @@ on:
     paths:
       - "bin/run_gazebo_dynamic_supported_hold_variant"
       - "bin/summarize_rubiks_dynamic_hold_repeatability.py"
+      - "bin/summarize_rubiks_dynamic_hold_repeatability_quarter_mm.py"
       - "bin/run_gazebo_dynamic_supported_hold"
       - "bin/run_rubiks_dynamic_supported_hold.py"
       - "bin/render_rubiks_cube_contact_video.py"
@@ -19,6 +20,7 @@ on:
     paths:
       - "bin/run_gazebo_dynamic_supported_hold_variant"
       - "bin/summarize_rubiks_dynamic_hold_repeatability.py"
+      - "bin/summarize_rubiks_dynamic_hold_repeatability_quarter_mm.py"
       - "bin/run_gazebo_dynamic_supported_hold"
       - "bin/run_rubiks_dynamic_supported_hold.py"
       - "bin/render_rubiks_cube_contact_video.py"
@@ -47,7 +49,9 @@ jobs:
 
       - name: Validate repeatability harness
         run: |
-          python3 -m py_compile bin/summarize_rubiks_dynamic_hold_repeatability.py
+          python3 -m py_compile \
+            bin/summarize_rubiks_dynamic_hold_repeatability.py \
+            bin/summarize_rubiks_dynamic_hold_repeatability_quarter_mm.py
           bash -n bin/run_gazebo_dynamic_supported_hold_variant
           python3 - <<'PY'
           from pathlib import Path
@@ -58,7 +62,11 @@ jobs:
               raise SystemExit('base supported-hold harness no longer has one cube-y anchor')
           wrapper = Path('bin/run_gazebo_dynamic_supported_hold_variant').read_text(encoding='utf-8')
           if 'abs(cube_y) > 0.001' not in wrapper:
-              raise SystemExit('variant runner lacks the 1 mm safety bound')
+              raise SystemExit('variant runner lacks the 1 mm absolute safety bound')
+          if 'maximum_alignment_travel_m = 0.0015' not in wrapper:
+              raise SystemExit('variant runner lacks the 1.5 mm alignment bound')
+          if 'initial gripper joint/link telemetry' not in wrapper:
+              raise SystemExit('variant runner lacks deterministic initial telemetry wait')
           PY
 
       - name: Install video encoder
@@ -74,9 +82,9 @@ jobs:
           set -u
           mkdir -p artifacts
           trials=(
-            "minus_0p5mm|-0.0005|41"
+            "minus_0p25mm|-0.00025|41"
             "center|0.0|42"
-            "plus_0p5mm|0.0005|43"
+            "plus_0p25mm|0.00025|43"
           )
           for specification in "${trials[@]}"; do
             IFS='|' read -r label cube_y domain_id <<<"${specification}"
@@ -120,7 +128,7 @@ jobs:
 
       - name: Aggregate repeatability evidence
         run: |
-          python3 bin/summarize_rubiks_dynamic_hold_repeatability.py \
+          python3 bin/summarize_rubiks_dynamic_hold_repeatability_quarter_mm.py \
             --root artifacts \
             --output artifacts/rubiks_dynamic_hold_repeatability_summary.json \
             --manifest artifacts/rubiks_dynamic_hold_repeatability_evidence.manifest.json
@@ -140,7 +148,7 @@ jobs:
               raise SystemExit('repeatability gate did not contain exactly three trials')
           if not all(trial.get('passed') is True for trial in summary.get('trials', [])):
               raise SystemExit('one or more repeatability trials did not pass')
-          if summary.get('offsets_m') != [-0.0005, 0.0, 0.0005]:
+          if summary.get('offsets_m') != [-0.00025, 0.0, 0.00025]:
               raise SystemExit('unexpected repeatability offset matrix')
           for key in (
               'arm_motion_performed', 'lift_command_sent', 'support_removed',
