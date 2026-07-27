@@ -28,9 +28,11 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-ros2 launch turtlebot3_lime_bringup gazebo.launch.py \
-  start_rviz:=false use_sim:=true \
-  x_pose:=0.0 y_pose:=0.0 z_pose:=0.01 yaw:=0.0 \
+# The first visual gate deliberately excludes the robot and its rendering
+# sensors. It validates only the cube model, gravity, collision, settle
+# behavior, Gazebo GUI, and recording path.
+ros2 launch gazebo_ros gazebo.launch.py \
+  verbose:=false \
   world:=/project/resource/rubiks_grasp_calibration.world \
   >"${LAUNCH_LOG}" 2>&1 &
 LAUNCH_PID=$!
@@ -77,6 +79,7 @@ manifest = {
     "schema_version": 1,
     "trial_type": "spawn_settle_visual_evidence",
     "automatic_grasp_success": False,
+    "robot_spawned": False,
     "gripper_motion_performed": False,
     "entity": "rubiks_cube_settle",
     "spawn": {"x_m": 0.45, "y_m": 0.0, "z_m": 0.35, "yaw_rad": 0.35},
