@@ -34,7 +34,7 @@ jobs:
       - name: Install capture dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends xvfb openbox xdotool ffmpeg
+          sudo apt-get install -y --no-install-recommends xvfb openbox xdotool x11-utils ffmpeg
       - name: Build current Lime simulation image
         run: docker build -t lime-tidyup-rubiks-video:${{ github.sha }} .
       - name: Run isolated settle trial and capture Gazebo
@@ -46,6 +46,11 @@ jobs:
           Xvfb :99 -screen 0 1280x720x24 -ac +extension GLX +render -noreset \
             >artifacts/xvfb.log 2>&1 &
           XVFB_PID=$!
+          for _ in $(seq 1 30); do
+            DISPLAY=:99 xdpyinfo >/dev/null 2>&1 && break
+            sleep 1
+          done
+          DISPLAY=:99 xdpyinfo >/dev/null
           DISPLAY=:99 openbox >artifacts/openbox.log 2>&1 &
           OPENBOX_PID=$!
           cleanup() {
@@ -102,6 +107,7 @@ jobs:
           test -s artifacts/rubiks_cube_settle_visual_evidence.mp4
           test -s artifacts/rubiks_cube_settle.manifest.json
           test -s artifacts/rubiks_cube_model_validation.json
+          grep -q 'rubiks_cube_settle' artifacts/rubiks_cube_model_states_final.yaml
           ffprobe -v error -show_entries format=duration,size \
             -of json artifacts/rubiks_cube_settle_visual_evidence.mp4 \
             >artifacts/rubiks_cube_settle_visual_evidence.ffprobe.json
@@ -109,16 +115,39 @@ jobs:
           python3 - <<'PY'
           import json
           from pathlib import Path
+          import subprocess
+
+          video = 'artifacts/rubiks_cube_settle_visual_evidence.mp4'
           probe = json.loads(Path('artifacts/rubiks_cube_settle_visual_evidence.ffprobe.json').read_text())
           duration = float(probe['format']['duration'])
           if duration < 8.0:
               raise SystemExit(f'video too short: {duration}')
+
+          def raw_frame(at):
+              return subprocess.run(
+                  ['ffmpeg', '-v', 'error', '-ss', str(at), '-i', video,
+                   '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'],
+                  check=True, capture_output=True,
+              ).stdout
+
+          early = raw_frame(min(2.0, duration / 4.0))
+          late = raw_frame(max(0.0, duration - 2.0))
+          expected = 1280 * 720 * 3
+          if len(early) != expected or len(late) != expected:
+              raise SystemExit('unexpected captured frame size')
+          mean_difference = sum(abs(a - b) for a, b in zip(early, late)) / expected
+          late_mean = sum(late) / expected
+          if mean_difference < 2.0:
+              raise SystemExit(f'video appears static or stuck on splash: diff={mean_difference:.3f}')
+          if late_mean < 5.0:
+              raise SystemExit(f'late frame appears blank: mean={late_mean:.3f}')
+
           manifest = json.loads(Path('artifacts/rubiks_cube_settle.manifest.json').read_text())
           if manifest.get('automatic_grasp_success') is not False:
               raise SystemExit('settle evidence must not declare grasp success')
           if manifest.get('gripper_motion_performed') is not False:
               raise SystemExit('first visual gate must not move the gripper')
-          print(f'video duration: {duration:.2f}s')
+          print(f'video duration={duration:.2f}s frame_diff={mean_difference:.3f}')
           PY
       - name: Upload video and evidence
         if: always()
