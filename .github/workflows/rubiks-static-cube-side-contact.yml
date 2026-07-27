@@ -1,0 +1,147 @@
+name: Rubik static cube side-contact evidence
+
+on:
+  push:
+    paths:
+      - "bin/run_rubiks_static_cube_contact.py"
+      - "bin/run_gazebo_static_cube_side_contact"
+      - "bin/render_rubiks_cube_contact_video.py"
+      - "project/resource/rubiks_static_cube_contact_057.sdf"
+      - "project/resource/turtlebot3_lime_gripper_test.urdf.xacro"
+      - "project/resource/gazebo_gripper_test_controller_manager.yaml"
+      - "project/resource/rubiks_grasp_calibration.world"
+      - "doc/rubiks_static_cube_side_contact.md"
+      - ".github/workflows/rubiks-static-cube-side-contact.yml"
+  pull_request:
+    paths:
+      - "bin/run_rubiks_static_cube_contact.py"
+      - "bin/run_gazebo_static_cube_side_contact"
+      - "bin/render_rubiks_cube_contact_video.py"
+      - "project/resource/rubiks_static_cube_contact_057.sdf"
+      - "project/resource/turtlebot3_lime_gripper_test.urdf.xacro"
+      - "project/resource/gazebo_gripper_test_controller_manager.yaml"
+      - "project/resource/rubiks_grasp_calibration.world"
+      - "doc/rubiks_static_cube_side_contact.md"
+      - ".github/workflows/rubiks-static-cube-side-contact.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rubiks-static-cube-contact-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static-cube-side-contact-evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate side-contact harness
+        run: |
+          python3 -m py_compile \
+            bin/run_rubiks_static_cube_contact.py \
+            bin/render_rubiks_cube_contact_video.py
+          bash -n bin/run_gazebo_static_cube_side_contact
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          ET.parse('project/resource/rubiks_static_cube_contact_057.sdf')
+          ET.parse('project/resource/turtlebot3_lime_gripper_test.urdf.xacro')
+          ET.parse('project/resource/rubiks_grasp_calibration.world')
+          PY
+          grep -q '<static>true</static>' project/resource/rubiks_static_cube_contact_057.sdf
+          grep -q '<size>0.057 0.057 0.057</size>' project/resource/rubiks_static_cube_contact_057.sdf
+          grep -q 'libgazebo_ros_bumper.so' project/resource/rubiks_static_cube_contact_057.sdf
+          ! grep -q 'libgazebo_grasp_fix.so' project/resource/turtlebot3_lime_gripper_test.urdf.xacro
+
+      - name: Install video encoder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Build current Lime simulation image
+        run: docker build -t lime-tidyup-static-cube-contact:${{ github.sha }} .
+
+      - name: Run static cube side-contact trial
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          cp project/resource/rubiks_static_cube_contact_057.sdf artifacts/
+          docker run --rm --network host \
+            -v "$PWD/artifacts:/artifacts" \
+            lime-tidyup-static-cube-contact:${{ github.sha }} \
+            bash -lc 'bash /root/bin/run_gazebo_static_cube_side_contact /artifacts' \
+            >artifacts/container.stdout.log 2>artifacts/container.stderr.log
+
+      - name: Validate static cube side-contact evidence
+        run: |
+          test -s artifacts/turtlebot3_lime_gripper_test.urdf
+          test -s artifacts/rubiks_static_cube_contact_057.sdf
+          test -s artifacts/rubiks_static_cube_contact_telemetry.json
+          test -s artifacts/rubiks_static_cube_contact_summary.json
+          test -s artifacts/rubiks_static_cube_contact_evidence.manifest.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          summary = json.loads(Path('artifacts/rubiks_static_cube_contact_summary.json').read_text())
+          if summary.get('passed') is not True:
+              raise SystemExit(summary.get('errors'))
+          for key in (
+              'left_cube_contact_observed',
+              'right_cube_contact_observed',
+              'dual_cube_contact_observed',
+              'contact_cleared_after_reopen',
+          ):
+              if summary.get(key) is not True:
+                  raise SystemExit(f'{key} must be true')
+          if summary.get('initial_open_contact') is not False:
+              raise SystemExit('cube intersected the fully open gripper')
+          result = summary['contact_result']
+          if abs(float(result['opening_error_m'])) > float(result['acceptance_tolerance_m']):
+              raise SystemExit('calibrated inner opening does not match the cube width')
+          if float(summary['cube_displacement_m']) > 1e-6:
+              raise SystemExit('static cube moved')
+          if float(summary['cube_rotation_rad']) > 1e-6:
+              raise SystemExit('static cube rotated')
+          for key in (
+              'cube_mass_dynamics_tested', 'arm_motion_performed', 'lift_command_sent',
+              'cube_lifted', 'ifra_attachment_used', 'grasp_success_claimed',
+          ):
+              if summary.get(key) is not False:
+                  raise SystemExit(f'{key} must remain false')
+          print(json.dumps(summary, indent=2))
+          PY
+
+      - name: Render calibrated side-contact video
+        run: |
+          python3 bin/render_rubiks_cube_contact_video.py \
+            --telemetry artifacts/rubiks_static_cube_contact_telemetry.json \
+            --output artifacts/rubiks_static_cube_contact_telemetry_evidence.mp4
+          ffprobe -v error -show_entries format=duration,size \
+            -of json artifacts/rubiks_static_cube_contact_telemetry_evidence.mp4 \
+            >artifacts/rubiks_static_cube_contact_telemetry_evidence.ffprobe.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          probe = json.loads(Path('artifacts/rubiks_static_cube_contact_telemetry_evidence.ffprobe.json').read_text())
+          duration = float(probe['format']['duration'])
+          size = int(probe['format']['size'])
+          if duration < 4.0:
+              raise SystemExit(f'video too short: {duration}')
+          if size < 10000:
+              raise SystemExit(f'video unexpectedly small: {size}')
+          print(f'video duration={duration:.3f}s size={size}')
+          PY
+
+      - name: Upload static cube side-contact evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-static-cube-side-contact-evidence
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
