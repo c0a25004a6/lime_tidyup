@@ -1,0 +1,19 @@
+controller_manager:
+  ros__parameters:
+    use_sim_time: true
+    update_rate: 100
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    gripper_controller:
+      type: position_controllers/GripperActionController
+
+gripper_controller:
+  ros__parameters:
+    use_sim_time: true
+    joint: gripper_left_joint
+    action_monitor_rate: 20.0
+    goal_tolerance: 0.0015
+    max_effort: 2.0
+    allow_stalling: false
