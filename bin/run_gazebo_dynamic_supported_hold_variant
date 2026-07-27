@@ -3,35 +3,135 @@ set -euo pipefail
 
 ARTIFACT_DIR="${1:?artifact directory is required}"
 CUBE_Y="${2:?cube Y offset is required}"
-BASE_SCRIPT="/root/bin/run_gazebo_dynamic_supported_hold"
-TEMP_SCRIPT="$(mktemp /tmp/rubiks-supported-hold-variant.XXXXXX)"
+BASE_SHELL="/root/bin/run_gazebo_dynamic_supported_hold"
+BASE_PYTHON="/root/bin/run_rubiks_dynamic_supported_hold.py"
+TEMP_SHELL="$(mktemp /tmp/rubiks-supported-hold-shell.XXXXXX)"
+TEMP_PYTHON="$(mktemp /tmp/rubiks-supported-hold-python.XXXXXX.py)"
 
 cleanup() {
-  rm -f "${TEMP_SCRIPT}"
+  rm -f "${TEMP_SHELL}" "${TEMP_PYTHON}"
 }
 trap cleanup EXIT
 
-python3 - "${BASE_SCRIPT}" "${TEMP_SCRIPT}" "${CUBE_Y}" <<'PY'
+python3 - "${BASE_SHELL}" "${TEMP_SHELL}" "${BASE_PYTHON}" "${TEMP_PYTHON}" "${CUBE_Y}" <<'PY'
 from __future__ import annotations
 
 import math
 from pathlib import Path
 import sys
 
-source = Path(sys.argv[1])
-target = Path(sys.argv[2])
-cube_y = float(sys.argv[3])
+base_shell = Path(sys.argv[1])
+temp_shell = Path(sys.argv[2])
+base_python = Path(sys.argv[3])
+temp_python = Path(sys.argv[4])
+cube_y = float(sys.argv[5])
 if not math.isfinite(cube_y):
     raise SystemExit("cube Y offset must be finite")
 if abs(cube_y) > 0.001:
     raise SystemExit(f"cube Y offset exceeds the repeatability safety bound: {cube_y}")
-text = source.read_text(encoding="utf-8")
-anchor = "  --cube-y 0.0 \\\n"
-if text.count(anchor) != 1:
+
+shell_text = base_shell.read_text(encoding="utf-8")
+cube_y_anchor = "  --cube-y 0.0 \\\n"
+if shell_text.count(cube_y_anchor) != 1:
     raise SystemExit("base supported-hold harness no longer has the expected cube-y anchor")
-replacement = f"  --cube-y {cube_y:.6f} \\\n"
-target.write_text(text.replace(anchor, replacement, 1), encoding="utf-8")
-target.chmod(0o755)
+python_path_anchor = "/root/bin/run_rubiks_dynamic_supported_hold.py"
+if shell_text.count(python_path_anchor) != 1:
+    raise SystemExit("base supported-hold harness no longer has one Python runner anchor")
+shell_text = shell_text.replace(
+    cube_y_anchor, f"  --cube-y {cube_y:.6f} \\\n", 1
+)
+shell_text = shell_text.replace(python_path_anchor, str(temp_python), 1)
+temp_shell.write_text(shell_text, encoding="utf-8")
+temp_shell.chmod(0o755)
+
+python_text = base_python.read_text(encoding="utf-8")
+old_block = '''        target = args.close_start
+        step_index = 0
+        contact_event: dict | None = None
+        while target >= args.close_stop - 1e-12:
+            event = node.send_goal(
+                label=f"close_step_{step_index:02d}",
+                target=target,
+                max_effort=args.max_effort,
+                timeout=args.timeout,
+                monitor_contact=True,
+            )
+            events.append(event)
+            if event["contact_observed"]:
+                contact_event = event
+                break
+            if not event["reached_goal"] or event["stalled"]:
+                raise RuntimeError(
+                    f"close step {target:.6f} failed before dynamic cube contact"
+                )
+            node.spin_for(args.step_hold)
+            target -= args.close_step
+            step_index += 1
+        if contact_event is None:
+            raise RuntimeError("no finger contact was observed in the bounded close sweep")
+'''
+new_block = '''        target = args.close_start
+        step_index = 0
+        alignment_step_index = 0
+        first_unilateral_target: float | None = None
+        maximum_alignment_travel_m = 0.0015
+        contact_event: dict | None = None
+        while target >= args.close_stop - 1e-12:
+            aligning = first_unilateral_target is not None
+            event = node.send_goal(
+                label=(
+                    f"align_step_{alignment_step_index:02d}"
+                    if aligning
+                    else f"close_step_{step_index:02d}"
+                ),
+                target=target,
+                max_effort=args.max_effort,
+                timeout=args.timeout,
+                monitor_contact=not aligning,
+            )
+            events.append(event)
+            if event["dual_contact_observed"]:
+                contact_event = event
+                break
+            if event["contact_observed"] and first_unilateral_target is None:
+                first_unilateral_target = target
+            elif first_unilateral_target is None:
+                if not event["reached_goal"] or event["stalled"]:
+                    raise RuntimeError(
+                        f"close step {target:.6f} failed before dynamic cube contact"
+                    )
+            else:
+                if event["stalled"] or not event["reached_goal"]:
+                    raise RuntimeError(
+                        f"alignment step {target:.6f} failed before bilateral contact"
+                    )
+
+            if first_unilateral_target is not None:
+                alignment_travel_m = first_unilateral_target - target
+                if alignment_travel_m >= maximum_alignment_travel_m - 1e-12:
+                    raise RuntimeError(
+                        "bilateral contact was not reached within the bounded "
+                        f"{maximum_alignment_travel_m:.6f} m alignment travel"
+                    )
+                alignment_step_index += 1
+
+            node.spin_for(args.step_hold)
+            target -= args.close_step
+            step_index += 1
+        if contact_event is None:
+            if first_unilateral_target is None:
+                raise RuntimeError(
+                    "no finger contact was observed in the bounded close sweep"
+                )
+            raise RuntimeError(
+                "unilateral contact was observed but bilateral contact was not established"
+            )
+'''
+if python_text.count(old_block) != 1:
+    raise SystemExit("base dynamic hold runner no longer has the expected close-loop anchor")
+python_text = python_text.replace(old_block, new_block, 1)
+temp_python.write_text(python_text, encoding="utf-8")
+temp_python.chmod(0o755)
 PY
 
-bash "${TEMP_SCRIPT}" "${ARTIFACT_DIR}"
+bash "${TEMP_SHELL}" "${ARTIFACT_DIR}"
