@@ -1,0 +1,49 @@
+<?xml version="1.0"?>
+<sdf version="1.7">
+  <model name="rubiks_static_gauge_057">
+    <static>true</static>
+    <link name="gauge_link">
+      <collision name="gauge_collision">
+        <geometry>
+          <!-- x depth, known y width, z height -->
+          <box><size>0.012 0.057 0.020</size></box>
+        </geometry>
+        <surface>
+          <friction>
+            <ode><mu>1.0</mu><mu2>1.0</mu2></ode>
+          </friction>
+          <bounce><restitution_coefficient>0.0</restitution_coefficient></bounce>
+          <contact>
+            <collide_without_contact>false</collide_without_contact>
+            <ode><max_vel>0.001</max_vel><min_depth>0.00001</min_depth></ode>
+          </contact>
+        </surface>
+      </collision>
+      <visual name="gauge_visual">
+        <geometry>
+          <box><size>0.012 0.057 0.020</size></box>
+        </geometry>
+        <material>
+          <ambient>0.95 0.65 0.10 1</ambient>
+          <diffuse>0.95 0.65 0.10 1</diffuse>
+          <specular>0.15 0.15 0.15 1</specular>
+        </material>
+      </visual>
+      <sensor name="gauge_contact_sensor" type="contact">
+        <always_on>true</always_on>
+        <update_rate>500</update_rate>
+        <visualize>false</visualize>
+        <contact>
+          <collision>gauge_collision</collision>
+        </contact>
+        <plugin name="rubiks_gauge_contact_ros" filename="libgazebo_ros_bumper.so">
+          <ros>
+            <namespace>/rubiks_gauge</namespace>
+            <argument>bumper_states:=contact_states</argument>
+          </ros>
+          <frame_name>gauge_link</frame_name>
+        </plugin>
+      </sensor>
+    </link>
+  </model>
+</sdf>
