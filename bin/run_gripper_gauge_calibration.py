@@ -352,7 +352,7 @@ def main() -> int:
     parser.add_argument("--gauge-y", type=float, default=0.0)
     parser.add_argument("--gauge-z", type=float, default=0.1007)
     parser.add_argument("--close-start", type=float, default=0.0185)
-    parser.add_argument("--close-stop", type=float, default=0.0130)
+    parser.add_argument("--close-stop", type=float, default=0.0060)
     parser.add_argument("--close-step", type=float, default=0.00025)
     parser.add_argument("--step-hold", type=float, default=0.12)
     parser.add_argument("--max-effort", type=float, default=0.25)
@@ -480,7 +480,7 @@ def main() -> int:
             "predicted_closed_inner_face_opening_m": 0.022 - combined_offset,
             "formula": "inner_face_opening_m = link_frame_separation_m - combined_inner_face_offset_m",
         }
-        if not 0.008 <= combined_offset <= 0.030:
+        if not 0.001 <= combined_offset <= 0.010:
             raise RuntimeError(f"implausible combined inner-face offset: {combined_offset}")
         if calibration["predicted_open_inner_face_opening_m"] <= args.gauge_width:
             raise RuntimeError("calibrated full-open inner-face opening does not clear the gauge")
