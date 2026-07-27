@@ -98,8 +98,14 @@ jobs:
               raise SystemExit('contact did not clear after reopening')
           calibration = summary['calibration']
           offset = float(calibration['combined_inner_face_offset_m'])
-          if not 0.008 <= offset <= 0.030:
+          if not 0.001 <= offset <= 0.010:
               raise SystemExit(f'implausible combined offset: {offset}')
+          open_width = float(calibration['predicted_open_inner_face_opening_m'])
+          closed_width = float(calibration['predicted_closed_inner_face_opening_m'])
+          if not 0.070 <= open_width <= 0.080:
+              raise SystemExit(f'unexpected calibrated full-open width: {open_width}')
+          if not 0.010 <= closed_width <= 0.022:
+              raise SystemExit(f'unexpected calibrated full-closed width: {closed_width}')
           if float(calibration['estimated_uncertainty_m']) > 0.003:
               raise SystemExit('calibration uncertainty exceeds 3 mm')
           for key in ('cube_spawned', 'cube_contact', 'ifra_attachment_used', 'grasp_success_claimed'):
