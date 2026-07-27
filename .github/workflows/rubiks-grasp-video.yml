@@ -4,12 +4,16 @@ on:
   push:
     paths:
       - "bin/run_rubiks_cube_settle_video"
+      - "bin/record_rubiks_model_states.py"
+      - "bin/render_rubiks_trajectory_video.py"
       - "project/resource/rubiks_grasp_calibration.world"
       - "project/resource/model_editor_models/rubiks_cube/**"
       - ".github/workflows/rubiks-grasp-video.yml"
   pull_request:
     paths:
       - "bin/run_rubiks_cube_settle_video"
+      - "bin/record_rubiks_model_states.py"
+      - "bin/render_rubiks_trajectory_video.py"
       - "project/resource/rubiks_grasp_calibration.world"
       - "project/resource/model_editor_models/rubiks_cube/**"
       - ".github/workflows/rubiks-grasp-video.yml"
@@ -26,128 +30,112 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate evidence harness
         run: |
+          python3 -m py_compile \
+            bin/rubiks_grasp_preflight.py \
+            bin/record_rubiks_model_states.py \
+            bin/render_rubiks_trajectory_video.py
           python3 - <<'PY'
           import xml.etree.ElementTree as ET
           ET.parse('project/resource/rubiks_grasp_calibration.world')
           PY
           bash -n bin/run_rubiks_cube_settle_video
-      - name: Install capture dependencies
+      - name: Install video encoder
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends xvfb openbox xdotool x11-utils ffmpeg
+          sudo apt-get install -y --no-install-recommends ffmpeg
       - name: Build current Lime simulation image
         run: docker build -t lime-tidyup-rubiks-video:${{ github.sha }} .
-      - name: Run isolated settle trial and capture Gazebo
-        env:
-          DISPLAY: :99
+      - name: Run headless Gazebo settle trial
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          Xvfb :99 -screen 0 1280x720x24 -ac +extension GLX +render -noreset \
-            >artifacts/xvfb.log 2>&1 &
-          XVFB_PID=$!
-          for _ in $(seq 1 30); do
-            DISPLAY=:99 xdpyinfo >/dev/null 2>&1 && break
-            sleep 1
-          done
-          DISPLAY=:99 xdpyinfo >/dev/null
-          DISPLAY=:99 openbox >artifacts/openbox.log 2>&1 &
-          OPENBOX_PID=$!
-          cleanup() {
-            docker rm -f rubiks-cube-settle-video >/dev/null 2>&1 || true
-            kill "$OPENBOX_PID" "$XVFB_PID" >/dev/null 2>&1 || true
-          }
-          trap cleanup EXIT
-          sleep 2
-
-          docker run --name rubiks-cube-settle-video --network host \
-            -e DISPLAY=:99 \
-            -e LIBGL_ALWAYS_SOFTWARE=1 \
-            -e QT_X11_NO_MITSHM=1 \
-            -v /tmp/.X11-unix:/tmp/.X11-unix \
+          docker run --rm --network host \
             -v "$PWD/artifacts:/artifacts" \
             lime-tidyup-rubiks-video:${{ github.sha }} \
             bash -lc 'bash /root/bin/run_rubiks_cube_settle_video /artifacts' \
-            >artifacts/container.log 2>&1 &
-          CONTAINER_RUN_PID=$!
-
-          found=0
-          for _ in $(seq 1 90); do
-            if DISPLAY=:99 xdotool search --name 'Gazebo' >/dev/null 2>&1; then
-              found=1
-              break
-            fi
-            if ! kill -0 "$CONTAINER_RUN_PID" 2>/dev/null; then
-              break
-            fi
-            sleep 1
-          done
-          if [[ "$found" != 1 ]]; then
-            cat artifacts/container.log
-            exit 1
-          fi
-
-          ffmpeg -y -loglevel warning \
-            -f x11grab -video_size 1280x720 -framerate 20 -i :99.0 \
-            -c:v libx264 -preset veryfast -crf 24 -pix_fmt yuv420p \
-            artifacts/rubiks_cube_settle_visual_evidence.mp4 \
-            >artifacts/ffmpeg.log 2>&1 &
-          FFMPEG_PID=$!
-          touch artifacts/start_capture
-
-          for _ in $(seq 1 120); do
-            [[ -f artifacts/trial_complete ]] && break
-            kill -0 "$CONTAINER_RUN_PID" 2>/dev/null || break
-            sleep 1
-          done
-          wait "$CONTAINER_RUN_PID"
-          kill -INT "$FFMPEG_PID" >/dev/null 2>&1 || true
-          wait "$FFMPEG_PID" || true
-
-          test -s artifacts/rubiks_cube_settle_visual_evidence.mp4
+            >artifacts/container.log 2>&1
+      - name: Validate physics telemetry
+        run: |
+          set -euo pipefail
+          test -s artifacts/rubiks_cube_trajectory.json
           test -s artifacts/rubiks_cube_settle.manifest.json
           test -s artifacts/rubiks_cube_model_validation.json
           grep -q 'rubiks_cube_settle' artifacts/rubiks_cube_model_states_final.yaml
-          ffprobe -v error -show_entries format=duration,size \
-            -of json artifacts/rubiks_cube_settle_visual_evidence.mp4 \
-            >artifacts/rubiks_cube_settle_visual_evidence.ffprobe.json
-
           python3 - <<'PY'
           import json
+          import math
           from pathlib import Path
-          import subprocess
 
-          video = 'artifacts/rubiks_cube_settle_visual_evidence.mp4'
-          probe = json.loads(Path('artifacts/rubiks_cube_settle_visual_evidence.ffprobe.json').read_text())
-          duration = float(probe['format']['duration'])
-          if duration < 8.0:
-              raise SystemExit(f'video too short: {duration}')
-
-          def raw_frame(at):
-              return subprocess.run(
-                  ['ffmpeg', '-v', 'error', '-ss', str(at), '-i', video,
-                   '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-'],
-                  check=True, capture_output=True,
-              ).stdout
-
-          early = raw_frame(min(2.0, duration / 4.0))
-          late = raw_frame(max(0.0, duration - 2.0))
-          expected = 1280 * 720 * 3
-          if len(early) != expected or len(late) != expected:
-              raise SystemExit('unexpected captured frame size')
-          mean_difference = sum(abs(a - b) for a, b in zip(early, late)) / expected
-          late_mean = sum(late) / expected
-          if mean_difference < 2.0:
-              raise SystemExit(f'video appears static or stuck on splash: diff={mean_difference:.3f}')
-          if late_mean < 5.0:
-              raise SystemExit(f'late frame appears blank: mean={late_mean:.3f}')
-
+          trajectory = json.loads(Path('artifacts/rubiks_cube_trajectory.json').read_text())
+          parameters = json.loads(Path('project/resource/model_editor_models/rubiks_cube/parameters.json').read_text())
           manifest = json.loads(Path('artifacts/rubiks_cube_settle.manifest.json').read_text())
+          samples = trajectory['samples']
+          edge = float(parameters['model']['edge_length_m'])
+          expected_final_z = edge / 2
+
+          if trajectory['sample_count'] < 50:
+              raise SystemExit(f"too few telemetry samples: {trajectory['sample_count']}")
+          first_z = float(samples[0]['position_m'][2])
+          final_z = float(samples[-1]['position_m'][2])
+          fall = first_z - final_z
+          final_speed = math.sqrt(sum(float(v) ** 2 for v in samples[-1]['linear_velocity_m_s']))
+          duration = float(samples[-1]['t_s'])
+
+          if first_z < 0.25:
+              raise SystemExit(f'initial cube height was not captured: {first_z}')
+          if fall < 0.20:
+              raise SystemExit(f'insufficient observed fall: {fall}')
+          if abs(final_z - expected_final_z) > 0.0025:
+              raise SystemExit(
+                  f'final z outside settle tolerance: actual={final_z} expected={expected_final_z}'
+              )
+          if final_speed > 0.02:
+              raise SystemExit(f'cube did not settle: final speed={final_speed}')
+          if duration < 8.0:
+              raise SystemExit(f'telemetry duration too short: {duration}')
           if manifest.get('automatic_grasp_success') is not False:
               raise SystemExit('settle evidence must not declare grasp success')
           if manifest.get('gripper_motion_performed') is not False:
-              raise SystemExit('first visual gate must not move the gripper')
-          print(f'video duration={duration:.2f}s frame_diff={mean_difference:.3f}')
+              raise SystemExit('first evidence gate must not move the gripper')
+          if manifest.get('raw_gazebo_gui_video') is not False:
+              raise SystemExit('artifact must identify itself as telemetry-rendered')
+
+          summary = {
+              'sample_count': trajectory['sample_count'],
+              'duration_s': duration,
+              'first_z_m': first_z,
+              'final_z_m': final_z,
+              'observed_fall_m': fall,
+              'expected_final_z_m': expected_final_z,
+              'final_linear_speed_m_s': final_speed,
+              'physics_gate_passed': True,
+          }
+          Path('artifacts/rubiks_cube_settle.physics_summary.json').write_text(
+              json.dumps(summary, indent=2) + '\n'
+          )
+          print(json.dumps(summary, indent=2))
+          PY
+      - name: Render telemetry evidence video
+        run: |
+          set -euo pipefail
+          python3 bin/render_rubiks_trajectory_video.py \
+            --trajectory artifacts/rubiks_cube_trajectory.json \
+            --parameters project/resource/model_editor_models/rubiks_cube/parameters.json \
+            --output artifacts/rubiks_cube_settle_telemetry_evidence.mp4
+          ffprobe -v error -show_entries format=duration,size \
+            -of json artifacts/rubiks_cube_settle_telemetry_evidence.mp4 \
+            >artifacts/rubiks_cube_settle_telemetry_evidence.ffprobe.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          probe = json.loads(Path('artifacts/rubiks_cube_settle_telemetry_evidence.ffprobe.json').read_text())
+          duration = float(probe['format']['duration'])
+          size = int(probe['format']['size'])
+          if duration < 8.0:
+              raise SystemExit(f'video too short: {duration}')
+          if size < 10000:
+              raise SystemExit(f'video unexpectedly small: {size}')
+          print(f'video duration={duration:.2f}s size={size}')
           PY
       - name: Upload video and evidence
         if: always()
