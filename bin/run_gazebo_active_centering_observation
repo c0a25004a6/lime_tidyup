@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+ARTIFACT_DIR="${1:?artifact directory is required}"
+REQUESTED_Y="${2:?requested Y is required}"
+REQUESTED_YAW="${3:?requested yaw is required}"
+EXPECTED_DECISION="${4:?expected decision is required}"
+mkdir -p "${ARTIFACT_DIR}"
+
+source /opt/ros/humble/setup.bash
+source /project/lib_ws/install/setup.bash
+source /root/turtlebot3_ws/install/setup.bash
+set -u
+
+export GAZEBO_MODEL_PATH="${GAZEBO_MODEL_PATH:-}:/root/.gazebo/models:/opt/ros/humble/share/turtlebot3_gazebo/models"
+export GAZEBO_PLUGIN_PATH="${GAZEBO_PLUGIN_PATH:-}:/project/lib_ws/install/IFRA_LinkAttacher/lib:/opt/ros/humble/lib"
+
+MODEL_NAME="turtlebot3_lime_gripper_test"
+URDF_PATH="${ARTIFACT_DIR}/turtlebot3_lime_gripper_test.urdf"
+SERVER_LOG="${ARTIFACT_DIR}/active_centering_observation.gzserver.log"
+RSP_LOG="${ARTIFACT_DIR}/active_centering_observation.robot_state_publisher.log"
+OBSERVATION="${ARTIFACT_DIR}/active_centering_observation.json"
+
+cleanup() {
+  status=$?
+  for pid in "${GZSERVER_PID:-}" "${RSP_PID:-}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+      kill -INT "${pid}" 2>/dev/null || true
+    fi
+  done
+  sleep 2
+  for pid in "${GZSERVER_PID:-}" "${RSP_PID:-}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+      kill -TERM "${pid}" 2>/dev/null || true
+      wait "${pid}" 2>/dev/null || true
+    fi
+  done
+  exit "${status}"
+}
+trap cleanup EXIT INT TERM
+
+ros2_service_available() {
+  local service_type
+  service_type="$(timeout 5 ros2 service type "$1" 2>/dev/null)" || return 1
+  [[ -n "${service_type}" ]]
+}
+
+BUMPER_PLUGIN="$(find /opt/ros/humble/lib -name libgazebo_ros_bumper.so -print -quit)"
+test -n "${BUMPER_PLUGIN}"
+printf '%s\n' "${BUMPER_PLUGIN}" >"${ARTIFACT_DIR}/active_centering_observation.bumper_plugin.txt"
+
+xacro /project/resource/turtlebot3_lime_gripper_test.urdf.xacro >"${URDF_PATH}"
+grep -q 'libgazebo_ros2_control.so' "${URDF_PATH}"
+! grep -q 'libgazebo_grasp_fix.so' "${URDF_PATH}"
+! grep -q 'librealsense_gazebo_plugin.so' "${URDF_PATH}"
+! grep -q 'libgazebo_ros_diff_drive.so' "${URDF_PATH}"
+! grep -q 'libgazebo_ros_ray_sensor.so' "${URDF_PATH}"
+
+ros2 run robot_state_publisher robot_state_publisher "${URDF_PATH}" \
+  --ros-args -p use_sim_time:=true \
+  >"${RSP_LOG}" 2>&1 &
+RSP_PID=$!
+sleep 2
+if ! kill -0 "${RSP_PID}" 2>/dev/null; then
+  cat "${RSP_LOG}"
+  exit 2
+fi
+
+gzserver /project/resource/rubiks_grasp_calibration.world \
+  -s libgazebo_ros_init.so \
+  -s libgazebo_ros_factory.so \
+  >"${SERVER_LOG}" 2>&1 &
+GZSERVER_PID=$!
+
+for _ in $(seq 1 90); do
+  if ros2_service_available '/spawn_entity'; then
+    break
+  fi
+  kill -0 "${GZSERVER_PID}" 2>/dev/null || { cat "${SERVER_LOG}"; exit 3; }
+  sleep 1
+done
+if ! ros2_service_available '/spawn_entity'; then
+  ros2 service list >"${ARTIFACT_DIR}/active_centering_observation.services_failure.txt" 2>&1 || true
+  cat "${SERVER_LOG}"
+  exit 3
+fi
+
+ros2 run gazebo_ros spawn_entity.py \
+  -entity "${MODEL_NAME}" \
+  -file "${URDF_PATH}" \
+  -x 0.0 -y 0.0 -z 0.03 -Y 0.0 \
+  >"${ARTIFACT_DIR}/active_centering_observation.robot_spawn.log" 2>&1
+
+sleep 3
+ros2 topic list >"${ARTIFACT_DIR}/active_centering_observation.topics_before.txt"
+gz topic -l >"${ARTIFACT_DIR}/active_centering_observation.gz_topics_before.txt" 2>&1 || true
+ros2 control list_controllers \
+  >"${ARTIFACT_DIR}/active_centering_observation.controllers_before.txt" 2>&1 || true
+
+set +e
+python3 /root/bin/run_rubiks_active_centering_observation.py \
+  --cube-sdf /project/resource/rubiks_dynamic_cube_supported_057.sdf \
+  --support-sdf /project/resource/rubiks_cube_support_surface.sdf \
+  --requested-y "${REQUESTED_Y}" \
+  --requested-yaw "${REQUESTED_YAW}" \
+  --expected-decision "${EXPECTED_DECISION}" \
+  --max-lateral 0.001 \
+  --max-yaw 0.03490658503988659 \
+  --reference-frame "${MODEL_NAME}::link7" \
+  --fixture-x 0.25 \
+  --support-z 0.10 \
+  --settle-seconds 2.0 \
+  --observe-seconds 1.0 \
+  --timeout 10.0 \
+  --output "${OBSERVATION}" \
+  >"${ARTIFACT_DIR}/active_centering_observation.stdout.json" \
+  2>"${ARTIFACT_DIR}/active_centering_observation.stderr.log"
+OBSERVATION_STATUS=$?
+set -e
+
+ros2 topic list >"${ARTIFACT_DIR}/active_centering_observation.topics_after.txt" || true
+ros2 control list_controllers \
+  >"${ARTIFACT_DIR}/active_centering_observation.controllers_after.txt" 2>&1 || true
+
+python3 - "${ARTIFACT_DIR}" "${OBSERVATION_STATUS}" <<'PY'
+from __future__ import annotations
+
+import json
+import math
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+process_status = int(sys.argv[2])
+observation_path = root / "active_centering_observation.json"
+if not observation_path.is_file():
+    raise SystemExit("active-centering observation was not written")
+data = json.loads(observation_path.read_text(encoding="utf-8"))
+errors = [str(error) for error in data.get("errors", [])]
+if process_status != 0 and not errors:
+    errors.append(f"observation process exited with status {process_status}")
+if data.get("trial_type") != "gazebo_active_centering_observation_dry_run":
+    errors.append("unexpected trial_type")
+if data.get("simulation_oracle_only") is not True:
+    errors.append("simulation_oracle_only must be true")
+if data.get("production_pose_estimator_claimed") is not False:
+    errors.append("production pose estimator must not be claimed")
+if data.get("support_contact_observed") is not True:
+    errors.append("cube support contact was not observed")
+if data.get("robot_contact_observed") is not False:
+    errors.append("cube contacted the robot in the observation fixture")
+for key in (
+    "arm_controller_loaded",
+    "arm_command_sent",
+    "gripper_controller_loaded",
+    "gripper_command_sent",
+    "support_removed",
+    "lift_command_sent",
+    "cube_lifted",
+    "ifra_attachment_used",
+    "grasp_success_claimed",
+):
+    if data.get(key) is not False:
+        errors.append(f"{key} must remain false")
+proposal = data.get("proposal") or {}
+if proposal.get("command_authorized") is not False:
+    errors.append("dry-run must never authorize a command")
+if proposal.get("decision") != data.get("expected_decision"):
+    errors.append("proposal decision does not match the expected matrix result")
+if abs(float(data.get("observation_error_y_m", 1.0))) > 0.00015:
+    errors.append("relative Y observation error exceeds 0.15 mm")
+if abs(float(data.get("observation_error_yaw_rad", 1.0))) > math.radians(0.15):
+    errors.append("relative yaw observation error exceeds 0.15 degrees")
+if int(data.get("sample_count", 0)) < 20:
+    errors.append("insufficient relative-pose samples")
+if float(data.get("maximum_cube_linear_speed_m_s", 1.0)) > 0.02:
+    errors.append("cube did not settle before pose observation")
+if float(data.get("maximum_cube_angular_speed_rad_s", 1.0)) > 0.2:
+    errors.append("cube angular motion remained too high")
+
+summary = {
+    "schema_version": 1,
+    "trial_type": data.get("trial_type"),
+    "passed": not errors,
+    "errors": errors,
+    "process_status": process_status,
+    "requested_relative_y_m": data.get("requested_relative_y_m"),
+    "requested_relative_yaw_rad": data.get("requested_relative_yaw_rad"),
+    "expected_decision": data.get("expected_decision"),
+    "measured_relative_y_m": data.get("measured_relative_y_m"),
+    "measured_relative_yaw_rad": data.get("measured_relative_yaw_rad"),
+    "observation_error_y_m": data.get("observation_error_y_m"),
+    "observation_error_yaw_rad": data.get("observation_error_yaw_rad"),
+    "proposal": proposal,
+    "sample_count": data.get("sample_count"),
+    "maximum_cube_linear_speed_m_s": data.get("maximum_cube_linear_speed_m_s"),
+    "maximum_cube_angular_speed_rad_s": data.get("maximum_cube_angular_speed_rad_s"),
+    "support_contact_observed": data.get("support_contact_observed"),
+    "robot_contact_observed": data.get("robot_contact_observed"),
+    "simulation_oracle_only": True,
+    "arm_command_sent": False,
+    "gripper_command_sent": False,
+    "support_removed": False,
+    "lift_command_sent": False,
+    "ifra_attachment_used": False,
+    "grasp_success_claimed": False,
+}
+(root / "active_centering_observation_summary.json").write_text(
+    json.dumps(summary, indent=2) + "\n", encoding="utf-8"
+)
+manifest = {
+    "schema_version": 1,
+    "evidence_type": "gazebo_active_centering_observation_dry_run",
+    "observation_source": "Gazebo /model_states and /link_states ground truth",
+    "simulation_oracle_only": True,
+    "production_pose_estimator_claimed": False,
+    "contact_free_fixture": True,
+    "production_urdf_modified": False,
+    "arm_command_sent": False,
+    "gripper_command_sent": False,
+    "support_removed": False,
+    "lift_command_sent": False,
+    "ifra_attachment_used": False,
+    "grasp_success_claimed": False,
+    "review_required": True,
+    "files": {
+        "observation": observation_path.name,
+        "summary": "active_centering_observation_summary.json",
+        "expanded_urdf": "turtlebot3_lime_gripper_test.urdf",
+    },
+}
+(root / "active_centering_observation_evidence.manifest.json").write_text(
+    json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+)
+print(json.dumps(summary, indent=2))
+if errors:
+    raise SystemExit("; ".join(errors))
+PY
