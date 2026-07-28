@@ -56,7 +56,7 @@ old_initial = '''        node.spin_for(1.0)
 '''
 new_initial = '''        node.wait_for(
             lambda: node.latest_joint is not None and node.latest_link is not None,
-            5.0,
+            10.0,
             "initial gripper joint/link telemetry",
         )
         initial_robot_state = node.latest_robot_state
