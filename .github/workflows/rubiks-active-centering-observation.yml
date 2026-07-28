@@ -1,0 +1,168 @@
+name: Rubik active centering observation evidence
+
+on:
+  push:
+    paths:
+      - "bin/run_rubiks_active_centering_observation.py"
+      - "bin/run_gazebo_active_centering_observation"
+      - "bin/summarize_active_centering_observation_matrix.py"
+      - "project/resource/rubiks_dynamic_cube_supported_057.sdf"
+      - "project/resource/rubiks_cube_support_surface.sdf"
+      - "project/resource/turtlebot3_lime_gripper_test.urdf.xacro"
+      - "project/resource/rubiks_grasp_calibration.world"
+      - "doc/rubiks_active_centering_observation.md"
+      - ".github/workflows/rubiks-active-centering-observation.yml"
+  pull_request:
+    paths:
+      - "bin/run_rubiks_active_centering_observation.py"
+      - "bin/run_gazebo_active_centering_observation"
+      - "bin/summarize_active_centering_observation_matrix.py"
+      - "project/resource/rubiks_dynamic_cube_supported_057.sdf"
+      - "project/resource/rubiks_cube_support_surface.sdf"
+      - "project/resource/turtlebot3_lime_gripper_test.urdf.xacro"
+      - "project/resource/rubiks_grasp_calibration.world"
+      - "doc/rubiks_active_centering_observation.md"
+      - ".github/workflows/rubiks-active-centering-observation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rubiks-active-centering-observation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  active-centering-observation-evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate command-free observation harness
+        run: |
+          python3 -m py_compile \
+            bin/run_rubiks_active_centering_observation.py \
+            bin/summarize_active_centering_observation_matrix.py
+          bash -n bin/run_gazebo_active_centering_observation
+          python3 - <<'PY'
+          from pathlib import Path
+
+          observer = Path('bin/run_rubiks_active_centering_observation.py').read_text(encoding='utf-8')
+          forbidden = (
+              'ActionClient(',
+              'create_publisher(',
+              'send_goal_async(',
+              'FollowJointTrajectory',
+              'GripperCommand',
+          )
+          for token in forbidden:
+              if token in observer:
+                  raise SystemExit(f'observer contains a command path: {token}')
+          for required in (
+              'simulation_oracle_only',
+              'command_authorized',
+              'arm_command_sent',
+              'gripper_command_sent',
+              'relative_pose(',
+              'yaw_from_quaternion(',
+          ):
+              if required not in observer:
+                  raise SystemExit(f'observer lacks required evidence field: {required}')
+          runner = Path('bin/run_gazebo_active_centering_observation').read_text(encoding='utf-8')
+          for forbidden in (
+              'controller_manager spawner',
+              'ros2 action send_goal',
+              'ros2 topic pub',
+          ):
+              if forbidden in runner:
+                  raise SystemExit(f'runner contains a command path: {forbidden}')
+          PY
+
+      - name: Build current Lime simulation image
+        run: docker build -t lime-tidyup-active-centering:${{ github.sha }} .
+
+      - name: Run active-centering observation matrix
+        run: |
+          set -u
+          mkdir -p artifacts
+          trials=(
+            "center|0.0|0.0|accept|51"
+            "minus_y|-0.0005|0.0|accept|52"
+            "plus_y|0.0005|0.0|accept|53"
+            "minus_yaw|0.0|-0.017453292519943295|accept|54"
+            "plus_yaw|0.0|0.017453292519943295|accept|55"
+            "mixed|0.0005|-0.017453292519943295|accept|56"
+            "reject_y|0.0015|0.0|reject|57"
+            "reject_yaw|0.0|0.05235987755982989|reject|58"
+          )
+          for specification in "${trials[@]}"; do
+            IFS='|' read -r label requested_y requested_yaw expected domain_id <<<"${specification}"
+            trial_dir="$PWD/artifacts/${label}"
+            mkdir -p "${trial_dir}"
+            cp project/resource/rubiks_dynamic_cube_supported_057.sdf "${trial_dir}/"
+            cp project/resource/rubiks_cube_support_surface.sdf "${trial_dir}/"
+            printf '%s\n' "${requested_y}" >"${trial_dir}/requested_y_m.txt"
+            printf '%s\n' "${requested_yaw}" >"${trial_dir}/requested_yaw_rad.txt"
+            printf '%s\n' "${expected}" >"${trial_dir}/expected_decision.txt"
+            printf '%s\n' "${domain_id}" >"${trial_dir}/ros_domain_id.txt"
+
+            set +e
+            docker run --rm --network host \
+              -e ROS_DOMAIN_ID="${domain_id}" \
+              -v "${trial_dir}:/artifacts" \
+              lime-tidyup-active-centering:${{ github.sha }} \
+              bash -lc "bash /root/bin/run_gazebo_active_centering_observation /artifacts '${requested_y}' '${requested_yaw}' '${expected}'" \
+              >"${trial_dir}/matrix_container.stdout.log" \
+              2>"${trial_dir}/matrix_container.stderr.log"
+            status=$?
+            set -e
+            printf '%s\n' "${status}" >"${trial_dir}/trial_exit_status.txt"
+            sleep 2
+          done
+
+      - name: Aggregate observation evidence
+        run: |
+          python3 bin/summarize_active_centering_observation_matrix.py \
+            --root artifacts \
+            --output artifacts/active_centering_observation_matrix_summary.json \
+            --manifest artifacts/active_centering_observation_matrix_evidence.manifest.json
+
+      - name: Validate observation safety boundary
+        run: |
+          test -s artifacts/active_centering_observation_matrix_summary.json
+          test -s artifacts/active_centering_observation_matrix_evidence.manifest.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          summary = json.loads(Path('artifacts/active_centering_observation_matrix_summary.json').read_text())
+          if summary.get('passed') is not True:
+              raise SystemExit(summary.get('errors'))
+          if int(summary.get('trial_count', 0)) != 8:
+              raise SystemExit('observation matrix must contain eight trials')
+          if int(summary.get('accepted_case_count', 0)) != 6:
+              raise SystemExit('observation matrix must contain six accepted cases')
+          if int(summary.get('rejected_case_count', 0)) != 2:
+              raise SystemExit('observation matrix must contain two rejected cases')
+          if summary.get('simulation_oracle_only') is not True:
+              raise SystemExit('simulation oracle boundary is missing')
+          if summary.get('production_pose_estimator_claimed') is not False:
+              raise SystemExit('production pose estimator must not be claimed')
+          for key in (
+              'arm_command_sent', 'gripper_command_sent', 'support_removed',
+              'lift_command_sent', 'ifra_attachment_used', 'grasp_success_claimed',
+          ):
+              if summary.get(key) is not False:
+                  raise SystemExit(f'{key} must remain false')
+          print(json.dumps(summary, indent=2))
+          PY
+
+      - name: Upload active-centering observation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-active-centering-observation-evidence
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
