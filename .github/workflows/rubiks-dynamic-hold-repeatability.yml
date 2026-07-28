@@ -5,8 +5,7 @@ on:
     paths:
       - "bin/run_gazebo_dynamic_supported_hold_variant"
       - "bin/summarize_rubiks_dynamic_hold_repeatability.py"
-      - "bin/summarize_rubiks_dynamic_hold_repeatability_quarter_mm.py"
-      - "bin/summarize_rubiks_dynamic_hold_repeatability_tenth_mm.py"
+      - "bin/summarize_rubiks_dynamic_hold_repeatability_fifty_microns.py"
       - "bin/run_gazebo_dynamic_supported_hold"
       - "bin/run_rubiks_dynamic_supported_hold.py"
       - "bin/render_rubiks_cube_contact_video.py"
@@ -21,8 +20,7 @@ on:
     paths:
       - "bin/run_gazebo_dynamic_supported_hold_variant"
       - "bin/summarize_rubiks_dynamic_hold_repeatability.py"
-      - "bin/summarize_rubiks_dynamic_hold_repeatability_quarter_mm.py"
-      - "bin/summarize_rubiks_dynamic_hold_repeatability_tenth_mm.py"
+      - "bin/summarize_rubiks_dynamic_hold_repeatability_fifty_microns.py"
       - "bin/run_gazebo_dynamic_supported_hold"
       - "bin/run_rubiks_dynamic_supported_hold.py"
       - "bin/render_rubiks_cube_contact_video.py"
@@ -53,8 +51,7 @@ jobs:
         run: |
           python3 -m py_compile \
             bin/summarize_rubiks_dynamic_hold_repeatability.py \
-            bin/summarize_rubiks_dynamic_hold_repeatability_quarter_mm.py \
-            bin/summarize_rubiks_dynamic_hold_repeatability_tenth_mm.py
+            bin/summarize_rubiks_dynamic_hold_repeatability_fifty_microns.py
           bash -n bin/run_gazebo_dynamic_supported_hold_variant
           python3 - <<'PY'
           from pathlib import Path
@@ -67,6 +64,7 @@ jobs:
           for required in (
               'abs(cube_y) > 0.001',
               'maximum_alignment_travel_m = 0.0015',
+              '10.0',
               'initial gripper joint/link telemetry',
               'cube exceeded 3 mm horizontal movement during alignment',
               'cube rose more than 1.5 mm during alignment',
@@ -75,6 +73,9 @@ jobs:
           ):
               if required not in wrapper:
                   raise SystemExit(f'variant runner lacks required safety guard: {required}')
+          aggregator = Path('bin/summarize_rubiks_dynamic_hold_repeatability.py').read_text(encoding='utf-8')
+          if 'partial_failure_is_reported_without_aggregator_exception' not in aggregator:
+              raise SystemExit('aggregator does not preserve partial-failure evidence')
           PY
 
       - name: Install video encoder
@@ -90,9 +91,9 @@ jobs:
           set -u
           mkdir -p artifacts
           trials=(
-            "minus_0p10mm|-0.0001|41"
+            "minus_0p05mm|-0.00005|41"
             "center|0.0|42"
-            "plus_0p10mm|0.0001|43"
+            "plus_0p05mm|0.00005|43"
           )
           for specification in "${trials[@]}"; do
             IFS='|' read -r label cube_y domain_id <<<"${specification}"
@@ -136,7 +137,7 @@ jobs:
 
       - name: Aggregate repeatability evidence
         run: |
-          python3 bin/summarize_rubiks_dynamic_hold_repeatability_tenth_mm.py \
+          python3 bin/summarize_rubiks_dynamic_hold_repeatability_fifty_microns.py \
             --root artifacts \
             --output artifacts/rubiks_dynamic_hold_repeatability_summary.json \
             --manifest artifacts/rubiks_dynamic_hold_repeatability_evidence.manifest.json
@@ -156,7 +157,7 @@ jobs:
               raise SystemExit('repeatability gate did not contain exactly three trials')
           if not all(trial.get('passed') is True for trial in summary.get('trials', [])):
               raise SystemExit('one or more repeatability trials did not pass')
-          if summary.get('offsets_m') != [-0.0001, 0.0, 0.0001]:
+          if summary.get('offsets_m') != [-0.00005, 0.0, 0.00005]:
               raise SystemExit('unexpected repeatability offset matrix')
           for key in (
               'arm_motion_performed', 'lift_command_sent', 'support_removed',
