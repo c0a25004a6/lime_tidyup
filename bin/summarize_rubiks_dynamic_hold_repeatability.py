@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Aggregate three no-lift dynamic supported-hold trials into one gate result."""
+"""Aggregate no-lift dynamic supported-hold trials into one gate result."""
 from __future__ import annotations
 
 import argparse
 import json
 import math
 from pathlib import Path
-
+from typing import Any
 
 TRIALS = (
     ("minus_0p5mm", -0.0005),
@@ -20,10 +20,105 @@ def require(condition: bool, message: str, errors: list[str]) -> None:
         errors.append(message)
 
 
-def load_json(path: Path) -> dict:
+def load_json(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise FileNotFoundError(path)
-    return json.loads(path.read_text(encoding="utf-8"))
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError(f"expected object in {path}")
+    return value
+
+
+def as_float(value: Any) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
+def at_least(value: Any, minimum: float, message: str, errors: list[str]) -> None:
+    number = as_float(value)
+    require(number is not None and number >= minimum, message, errors)
+
+
+def at_most(value: Any, maximum: float, message: str, errors: list[str]) -> None:
+    number = as_float(value)
+    require(number is not None and number <= maximum, message, errors)
+
+
+def abs_at_most(value: Any, maximum: float, message: str, errors: list[str]) -> None:
+    number = as_float(value)
+    require(number is not None and abs(number) <= maximum, message, errors)
+
+
+def aggregate_passed(records: list[dict[str, Any]]) -> dict[str, Any]:
+    passed = [record for record in records if record.get("passed") is True]
+    result: dict[str, Any] = {
+        "available_passed_trial_count": len(passed),
+        "all_required_trials_available": len(passed) == len(TRIALS),
+    }
+    if not passed:
+        return result
+
+    def values(path: tuple[str, ...]) -> list[float]:
+        output: list[float] = []
+        for record in passed:
+            value: Any = record
+            for key in path:
+                if not isinstance(value, dict):
+                    value = None
+                    break
+                value = value.get(key)
+            number = as_float(value)
+            if number is not None:
+                output.append(number)
+        return output
+
+    metric_specs = {
+        "minimum_support_contact_ratio": (min, ("hold_result", "support_contact_ratio")),
+        "minimum_bilateral_finger_contact_ratio": (
+            min,
+            ("hold_result", "bilateral_finger_contact_ratio"),
+        ),
+        "maximum_hold_horizontal_displacement_m": (
+            max,
+            ("hold_result", "movement", "max_horizontal_displacement_m"),
+        ),
+        "maximum_hold_vertical_rise_m": (
+            max,
+            ("hold_result", "movement", "max_vertical_rise_m"),
+        ),
+        "maximum_hold_rotation_rad": (
+            max,
+            ("hold_result", "movement", "max_rotation_rad"),
+        ),
+        "maximum_final_horizontal_offset_m": (
+            max,
+            (
+                "release_result",
+                "final_offset_from_preclose_settled_state",
+                "horizontal_displacement_m",
+            ),
+        ),
+        "maximum_final_rotation_rad": (
+            max,
+            (
+                "release_result",
+                "final_offset_from_preclose_settled_state",
+                "rotation_rad",
+            ),
+        ),
+    }
+    for name, (operation, path) in metric_specs.items():
+        found = values(path)
+        if found:
+            result[name] = operation(found)
+
+    opening_errors = values(("contact_result", "opening_error_m"))
+    if opening_errors:
+        result["maximum_abs_opening_error_m"] = max(abs(value) for value in opening_errors)
+    return result
 
 
 def main() -> int:
@@ -35,150 +130,183 @@ def main() -> int:
 
     root = Path(args.root)
     errors: list[str] = []
-    records: list[dict] = []
+    records: list[dict[str, Any]] = []
 
     for label, requested_y in TRIALS:
         trial_root = root / label
+        trial_errors: list[str] = []
+        summary: dict[str, Any] = {}
+        audit: dict[str, Any] = {}
+        telemetry: dict[str, Any] = {}
+        probe: dict[str, Any] = {}
         try:
             summary = load_json(trial_root / "rubiks_dynamic_supported_hold_summary.json")
-            audit = load_json(
-                trial_root / "rubiks_dynamic_supported_hold_normal_audit.json"
-            )
-            telemetry = load_json(
-                trial_root / "rubiks_dynamic_supported_hold_telemetry.json"
-            )
+            audit = load_json(trial_root / "rubiks_dynamic_supported_hold_normal_audit.json")
+            telemetry = load_json(trial_root / "rubiks_dynamic_supported_hold_telemetry.json")
             probe = load_json(
-                trial_root
-                / "rubiks_dynamic_supported_hold_telemetry_evidence.ffprobe.json"
+                trial_root / "rubiks_dynamic_supported_hold_telemetry_evidence.ffprobe.json"
             )
-        except (FileNotFoundError, json.JSONDecodeError) as exc:
-            errors.append(f"{label}: missing or invalid evidence: {exc}")
-            continue
+        except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
+            trial_errors.append(f"missing or invalid evidence: {exc}")
 
-        trial_errors: list[str] = []
-        require(summary.get("passed") is True, "summary did not pass", trial_errors)
-        require(audit.get("passed") is True, "side-normal audit did not pass", trial_errors)
-        require(
-            telemetry.get("trial_type")
-            == "gazebo_dynamic_supported_rubiks_cube_hold_release",
-            "unexpected trial_type",
-            trial_errors,
-        )
-        require(
-            telemetry.get("source_cube_collision_size_m") == [0.057, 0.057, 0.057],
-            "cube collision differs from canonical 57 mm",
-            trial_errors,
-        )
-        require(
-            math.isclose(float(telemetry.get("cube_mass_kg", -1)), 0.09, abs_tol=1e-12),
-            "cube mass differs from canonical 90 g",
-            trial_errors,
-        )
-        pose = telemetry.get("cube_pose_xyz_m") or []
-        require(len(pose) == 3, "cube pose is missing", trial_errors)
-        if len(pose) == 3:
+        if summary:
+            require(summary.get("passed") is True, "summary did not pass", trial_errors)
+            for error in summary.get("errors", []):
+                message = f"trial summary: {error}"
+                if message not in trial_errors:
+                    trial_errors.append(message)
+        if audit:
+            require(audit.get("passed") is True, "side-normal audit did not pass", trial_errors)
+        if telemetry:
             require(
-                math.isclose(float(pose[1]), requested_y, abs_tol=1e-9),
-                f"requested Y offset {requested_y} was not applied: {pose[1]}",
+                telemetry.get("trial_type")
+                == "gazebo_dynamic_supported_rubiks_cube_hold_release",
+                "unexpected trial_type",
                 trial_errors,
             )
-
-        for key in (
-            "cube_dynamic",
-            "cube_mass_dynamics_tested",
-            "support_static",
-            "support_contact_before_close",
-            "left_cube_contact_observed",
-            "right_cube_contact_observed",
-            "dual_cube_contact_observed",
-            "contact_cleared_after_reopen",
-        ):
-            require(telemetry.get(key) is True, f"{key} must be true", trial_errors)
-        require(
-            telemetry.get("initial_open_finger_contact") is False,
-            "finger contact existed while fully open",
-            trial_errors,
-        )
-        require(
-            int(telemetry.get("unexpected_robot_contact_count", -1)) == 0,
-            "cube contacted a non-finger robot collision",
-            trial_errors,
-        )
-        for key in (
-            "arm_motion_performed",
-            "lift_command_sent",
-            "cube_lifted",
-            "ifra_attachment_used",
-            "grasp_success_claimed",
-        ):
-            require(telemetry.get(key) is False, f"{key} must remain false", trial_errors)
+            require(
+                telemetry.get("source_cube_collision_size_m") == [0.057, 0.057, 0.057],
+                "cube collision differs from canonical 57 mm",
+                trial_errors,
+            )
+            mass = as_float(telemetry.get("cube_mass_kg"))
+            require(
+                mass is not None and math.isclose(mass, 0.09, abs_tol=1e-12),
+                "cube mass differs from canonical 90 g",
+                trial_errors,
+            )
+            pose = telemetry.get("cube_pose_xyz_m") or []
+            require(
+                isinstance(pose, list) and len(pose) == 3,
+                "cube pose is missing",
+                trial_errors,
+            )
+            if isinstance(pose, list) and len(pose) == 3:
+                pose_y = as_float(pose[1])
+                require(
+                    pose_y is not None
+                    and math.isclose(pose_y, requested_y, abs_tol=1e-9),
+                    f"requested Y offset {requested_y} was not applied: {pose[1]}",
+                    trial_errors,
+                )
+            for key in (
+                "cube_dynamic",
+                "cube_mass_dynamics_tested",
+                "support_static",
+                "support_contact_before_close",
+                "left_cube_contact_observed",
+                "right_cube_contact_observed",
+                "dual_cube_contact_observed",
+                "contact_cleared_after_reopen",
+            ):
+                require(telemetry.get(key) is True, f"{key} must be true", trial_errors)
+            require(
+                telemetry.get("initial_open_finger_contact") is False,
+                "finger contact existed while fully open",
+                trial_errors,
+            )
+            require(
+                int(telemetry.get("unexpected_robot_contact_count", -1)) == 0,
+                "cube contacted a non-finger robot collision",
+                trial_errors,
+            )
+            for key in (
+                "arm_motion_performed",
+                "lift_command_sent",
+                "cube_lifted",
+                "ifra_attachment_used",
+                "grasp_success_claimed",
+            ):
+                require(telemetry.get(key) is False, f"{key} must remain false", trial_errors)
 
         contact = summary.get("contact_result") or {}
         hold = summary.get("hold_result") or {}
         movement = hold.get("movement") or {}
         release = summary.get("release_result") or {}
         final_offset = release.get("final_offset_from_preclose_settled_state") or {}
+
+        opening_error = as_float(contact.get("opening_error_m"))
+        tolerance = as_float(contact.get("acceptance_tolerance_m"))
         require(
-            abs(float(contact.get("opening_error_m", 1.0)))
-            <= float(contact.get("acceptance_tolerance_m", 0.0)),
-            "calibrated opening error exceeds tolerance",
+            opening_error is not None
+            and tolerance is not None
+            and abs(opening_error) <= tolerance,
+            "calibrated opening error exceeds tolerance or is missing",
             trial_errors,
         )
-        require(
-            float(hold.get("support_contact_ratio", 0.0)) >= 0.75,
+        at_least(
+            hold.get("support_contact_ratio"),
+            0.75,
             "support contact coverage is below 75%",
             trial_errors,
         )
-        require(
-            float(hold.get("bilateral_finger_contact_ratio", 0.0)) >= 0.65,
+        at_least(
+            hold.get("bilateral_finger_contact_ratio"),
+            0.65,
             "bilateral finger contact coverage is below 65%",
             trial_errors,
         )
-        require(
-            float(movement.get("max_horizontal_displacement_m", 1.0)) <= 0.003,
-            "hold horizontal displacement exceeds 3 mm",
+        at_most(
+            movement.get("max_horizontal_displacement_m"),
+            0.003,
+            "hold horizontal displacement exceeds 3 mm or is missing",
             trial_errors,
         )
-        require(
-            float(movement.get("max_vertical_rise_m", 1.0)) <= 0.0015,
-            "hold vertical rise exceeds 1.5 mm",
+        at_most(
+            movement.get("max_vertical_rise_m"),
+            0.0015,
+            "hold vertical rise exceeds 1.5 mm or is missing",
             trial_errors,
         )
-        require(
-            float(movement.get("max_rotation_rad", 1.0)) <= 0.10,
-            "hold rotation exceeds 0.10 rad",
+        at_most(
+            movement.get("max_rotation_rad"),
+            0.10,
+            "hold rotation exceeds 0.10 rad or is missing",
             trial_errors,
         )
-        require(
-            float(release.get("support_contact_ratio", 0.0)) >= 0.75,
+        at_least(
+            release.get("support_contact_ratio"),
+            0.75,
             "post-release support contact coverage is below 75%",
             trial_errors,
         )
-        require(
-            float(release.get("final_cube_linear_speed_m_s", 1.0)) <= 0.02,
-            "post-release cube speed exceeds 0.02 m/s",
+        at_most(
+            release.get("final_cube_linear_speed_m_s"),
+            0.02,
+            "post-release cube speed exceeds 0.02 m/s or is missing",
             trial_errors,
         )
-        require(
-            float(final_offset.get("horizontal_displacement_m", 1.0)) <= 0.004,
-            "final horizontal offset exceeds 4 mm",
+        at_most(
+            final_offset.get("horizontal_displacement_m"),
+            0.004,
+            "final horizontal offset exceeds 4 mm or is missing",
             trial_errors,
         )
-        require(
-            abs(float(final_offset.get("vertical_displacement_m", 1.0))) <= 0.002,
-            "final vertical offset exceeds 2 mm",
+        abs_at_most(
+            final_offset.get("vertical_displacement_m"),
+            0.002,
+            "final vertical offset exceeds 2 mm or is missing",
             trial_errors,
         )
-        require(
-            float(final_offset.get("rotation_rad", 1.0)) <= 0.12,
-            "final rotation exceeds 0.12 rad",
+        at_most(
+            final_offset.get("rotation_rad"),
+            0.12,
+            "final rotation exceeds 0.12 rad or is missing",
             trial_errors,
         )
 
-        duration = float((probe.get("format") or {}).get("duration", 0.0))
-        size = int((probe.get("format") or {}).get("size", 0))
-        require(duration >= 7.0, "telemetry video is too short", trial_errors)
-        require(size >= 10000, "telemetry video is unexpectedly small", trial_errors)
+        duration = as_float((probe.get("format") or {}).get("duration"))
+        size = as_float((probe.get("format") or {}).get("size"))
+        require(
+            duration is not None and duration >= 7.0,
+            "telemetry video is too short or missing",
+            trial_errors,
+        )
+        require(
+            size is not None and size >= 10000,
+            "telemetry video is unexpectedly small or missing",
+            trial_errors,
+        )
 
         errors.extend(f"{label}: {error}" for error in trial_errors)
         records.append(
@@ -198,69 +326,19 @@ def main() -> int:
                 "release_result": release,
                 "normal_audit": audit,
                 "video_duration_s": duration,
-                "video_size_bytes": size,
+                "video_size_bytes": int(size) if size is not None else None,
                 "errors": trial_errors,
             }
         )
 
-    require(len(records) == len(TRIALS), "not all three trials produced evidence", errors)
+    require(len(records) == len(TRIALS), "not all required trials produced records", errors)
     all_passed = len(records) == len(TRIALS) and all(
         record["passed"] for record in records
     )
     require(all_passed, "one or more repeatability trials failed", errors)
 
-    if records:
-        aggregate = {
-            "minimum_support_contact_ratio": min(
-                float(record["hold_result"]["support_contact_ratio"])
-                for record in records
-            ),
-            "minimum_bilateral_finger_contact_ratio": min(
-                float(record["hold_result"]["bilateral_finger_contact_ratio"])
-                for record in records
-            ),
-            "maximum_abs_opening_error_m": max(
-                abs(float(record["contact_result"]["opening_error_m"]))
-                for record in records
-            ),
-            "maximum_hold_horizontal_displacement_m": max(
-                float(
-                    record["hold_result"]["movement"][
-                        "max_horizontal_displacement_m"
-                    ]
-                )
-                for record in records
-            ),
-            "maximum_hold_vertical_rise_m": max(
-                float(record["hold_result"]["movement"]["max_vertical_rise_m"])
-                for record in records
-            ),
-            "maximum_hold_rotation_rad": max(
-                float(record["hold_result"]["movement"]["max_rotation_rad"])
-                for record in records
-            ),
-            "maximum_final_horizontal_offset_m": max(
-                float(
-                    record["release_result"][
-                        "final_offset_from_preclose_settled_state"
-                    ]["horizontal_displacement_m"]
-                )
-                for record in records
-            ),
-            "maximum_final_rotation_rad": max(
-                float(
-                    record["release_result"][
-                        "final_offset_from_preclose_settled_state"
-                    ]["rotation_rad"]
-                )
-                for record in records
-            ),
-        }
-    else:
-        aggregate = {}
-
     output = {
-        "schema_version": 1,
+        "schema_version": 2,
         "gate_type": "gazebo_dynamic_supported_hold_lateral_repeatability",
         "passed": not errors,
         "errors": errors,
@@ -269,7 +347,7 @@ def main() -> int:
         "offset_axis": "cube Y relative to link7",
         "offsets_m": [offset for _, offset in TRIALS],
         "same_physics_and_acceptance_thresholds": True,
-        "aggregate": aggregate,
+        "aggregate": aggregate_passed(records),
         "trials": records,
         "arm_motion_performed": False,
         "lift_command_sent": False,
@@ -277,10 +355,12 @@ def main() -> int:
         "ifra_attachment_used": False,
         "grasp_success_claimed": False,
     }
-    Path(args.output).write_text(json.dumps(output, indent=2) + "\n", encoding="utf-8")
+    Path(args.output).write_text(
+        json.dumps(output, indent=2) + "\n", encoding="utf-8"
+    )
 
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "evidence_type": "gazebo_dynamic_supported_hold_lateral_repeatability",
         "source_pr": 7,
         "trial_labels": [label for label, _ in TRIALS],
@@ -296,6 +376,7 @@ def main() -> int:
         "review_required": True,
         "summary": Path(args.output).name,
         "trial_directories": [label for label, _ in TRIALS],
+        "partial_failure_is_reported_without_aggregator_exception": True,
     }
     Path(args.manifest).write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
