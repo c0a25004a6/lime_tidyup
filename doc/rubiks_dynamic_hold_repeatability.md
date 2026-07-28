@@ -2,11 +2,11 @@
 
 ## Current boundary candidate
 
-This gate repeats the accepted PR #7 dynamic supported close-hold-release trial in three fresh Gazebo processes. The current conservative passive-alignment candidate changes only the Rubik cube's initial lateral Y position relative to `link7`:
+This gate repeats the accepted PR #7 dynamic supported close-hold-release trial in three fresh Gazebo processes. The current passive-alignment candidate changes only the Rubik cube's initial lateral Y position relative to `link7`:
 
-- `-0.00005 m`;
+- `-0.000025 m`;
 - `0.0 m`;
-- `+0.00005 m`.
+- `+0.000025 m`.
 
 The canonical `0.057 m`, `0.09 kg` cube, support surface, gripper effort, close step, hold duration, release duration, calibration, and every physical acceptance threshold remain unchanged.
 
@@ -33,11 +33,21 @@ The subsequent `-0.00025 / 0.0 / +0.00025 m` candidate was also rejected without
 
 The `-0.00010 / 0.0 / +0.00010 m` matrix was rejected by workflow run `30295741929`.
 
-- `-0.10 mm`: both fingers were detected at `close_step_39`, but bilateral contact coverage during the two-second hold was only `0.05`; the contact immediately decayed instead of remaining a supported side hold;
-- `0.0 mm`: the central control passed with `1.0` support coverage, `1.0` bilateral coverage, approximately `0.369 mm` calibrated opening error, less than `0.01 mm` horizontal movement, and negligible rotation;
-- `+0.10 mm`: one-sided contact at `close_step_39` was followed by one `0.25 mm` alignment step. During that step the cube moved approximately `8.71 mm` horizontally and rose approximately `1.82 mm`, exceeding both safety limits before a hold was attempted.
+- `-0.10 mm`: both fingers were detected at `close_step_39`, but bilateral contact coverage during the two-second hold was only `0.05`;
+- `0.0 mm`: the central control passed with full support and bilateral coverage, approximately `0.369 mm` calibrated opening error, less than `0.01 mm` horizontal movement, and negligible rotation;
+- `+0.10 mm`: one-sided contact followed by one `0.25 mm` alignment step moved the cube approximately `8.71 mm` horizontally and raised it approximately `1.82 mm`, exceeding both safety limits.
 
-Therefore `±0.10 mm` is outside the currently demonstrated passive-alignment envelope. The failure is asymmetric and cannot be repaired by averaging or by loosening thresholds.
+### ±0.05 mm
+
+The `-0.00005 / 0.0 / +0.00005 m` matrix was rejected by workflow run `30327497255`.
+
+Both offset trials reported immediate bilateral contact at `close_step_39`, but that contact was not a stable face hold:
+
+- `-0.05 mm`: the transient maximum calibrated opening was approximately `64.42 mm`; during the final half-second the cube reached approximately `0.66 m/s`, `15.56 rad/s`, `36.8 mm` horizontal displacement, `3.69 mm` upward displacement, and `0.342 rad` rotation;
+- `0.0 mm`: the central control again passed with `1.0` support and bilateral coverage, approximately `0.359 mm` opening error, about `0.012 mm` maximum horizontal movement, and negligible rotation;
+- `+0.05 mm`: the transient maximum calibrated opening was approximately `63.61 mm`; during the final half-second the cube reached approximately `0.58 m/s`, `12.15 rad/s`, `42.3 mm` horizontal displacement, `4.00 mm` upward displacement, and `0.351 rad` rotation.
+
+The offset failures therefore cannot be repaired by replacing the maximum opening with a median or by waiting longer. The cube was dynamically diverging and leaving the supported side-contact state.
 
 ## Bounded unilateral alignment and immediate abort
 
@@ -69,4 +79,4 @@ Each trial starts a fresh container, ROS domain, and Gazebo process and writes a
 - no production URDF change;
 - no grasp-success claim.
 
-If the `±0.05 mm` matrix fails, the next safe characterization point is `±0.025 mm`. If it passes, `±0.075 mm` may be tested as the upper boundary. No support-removal or lift phase is authorized by this document.
+If the `±0.025 mm` matrix also fails while the center continues to pass, passive lateral tolerance is not practically demonstrated beyond exact centering. The next phase must then design active pose sensing or centering rather than continue shrinking the passive offset indefinitely. No support-removal or lift phase is authorized by this document.
