@@ -81,7 +81,8 @@ jobs:
                   raise SystemExit(f'arm-only controller configuration lacks {required}')
           for required in (
               "validate_world_properties", "'/gripper_controller/gripper_cmd'",
-              "'/arm_controller/follow_joint_trajectory'", 'return-to-zero',
+              "'/arm_controller/follow_joint_trajectory'",
+              'run_rubiks_pregrasp_simulation_state.py',
           ):
               if required not in runner:
                   raise SystemExit(f'runner lacks required gate: {required}')
