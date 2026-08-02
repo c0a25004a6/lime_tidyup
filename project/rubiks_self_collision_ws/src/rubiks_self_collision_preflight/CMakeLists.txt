@@ -1,0 +1,28 @@
+cmake_minimum_required(VERSION 3.8)
+project(rubiks_self_collision_preflight)
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic -Werror)
+endif()
+
+find_package(ament_cmake REQUIRED)
+find_package(moveit_core REQUIRED)
+find_package(moveit_ros_planning REQUIRED)
+find_package(srdfdom REQUIRED)
+find_package(urdf REQUIRED)
+
+add_executable(rubiks_self_collision_preflight src/rubiks_self_collision_preflight.cpp)
+target_compile_features(rubiks_self_collision_preflight PUBLIC cxx_std_17)
+ament_target_dependencies(
+  rubiks_self_collision_preflight
+  moveit_core
+  moveit_ros_planning
+  srdfdom
+  urdf
+)
+
+install(TARGETS rubiks_self_collision_preflight
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+ament_package()
