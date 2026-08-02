@@ -1,0 +1,215 @@
+name: Rubik command-free pregrasp state alignment
+
+on:
+  pull_request:
+    paths:
+      - "bin/rubiks_kinematic_preflight.py"
+      - "bin/find_rubiks_pregrasp_alignment.py"
+      - "bin/summarize_rubiks_pregrasp_state_alignment.py"
+      - "project/resource/turtlebot3_lime.urdf.xacro"
+      - "project/rubiks_self_collision_ws/**"
+      - "doc/rubiks_pregrasp_state_alignment_preflight.md"
+      - "Dockerfile"
+      - ".github/workflows/rubiks-pregrasp-state-alignment-preflight.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rubiks-pregrasp-state-alignment-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  command-free-pregrasp-state-alignment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXACT_HEAD_SHA }}
+
+      - name: Validate exact checkout and command-free sources
+        run: |
+          test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
+          python3 -m py_compile \
+            bin/rubiks_kinematic_preflight.py \
+            bin/find_rubiks_pregrasp_alignment.py \
+            bin/summarize_rubiks_pregrasp_state_alignment.py
+          python3 - <<'PY'
+          from pathlib import Path
+
+          search = Path('bin/find_rubiks_pregrasp_alignment.py').read_text(encoding='utf-8')
+          summary = Path('bin/summarize_rubiks_pregrasp_state_alignment.py').read_text(encoding='utf-8')
+          checker = Path('project/rubiks_self_collision_ws/src/rubiks_self_collision_preflight/src/rubiks_self_collision_preflight.cpp').read_text(encoding='utf-8')
+          combined = search + summary + checker
+          for forbidden in (
+              'rclpy', 'rclcpp', 'ActionClient', 'create_publisher', 'create_client',
+              'MoveGroupInterface', 'FollowJointTrajectory', 'GripperCommand',
+              'ros2 action', 'ros2 topic pub', 'controller_manager spawner',
+              'send_goal_async', 'execute(', 'asyncExecute',
+          ):
+              if forbidden in combined:
+                  raise SystemExit(f'pregrasp preflight contains a runtime command path: {forbidden}')
+          for required in (
+              'exhaustive_structured_subspace_grid', 'globally_nearest_claimed',
+              'INTERPOLATION_SEGMENTS = 100', 'checkSelfCollision',
+              'unknown_no_world_objects_added', 'deterministic_no_op',
+              'actuation_authorized',
+          ):
+              if required not in combined:
+                  raise SystemExit(f'pregrasp preflight lacks required evidence field: {required}')
+          PY
+
+      - name: Build exact-head Lime image
+        run: docker build -t lime-tidyup-pregrasp-alignment:${EXACT_HEAD_SHA} .
+
+      - name: Search and check offline pregrasp state matrix
+        run: |
+          mkdir -p artifacts
+          docker run --rm \
+            -e SOURCE_REF="${EXACT_HEAD_SHA}" \
+            -v "$PWD/artifacts:/artifacts" \
+            lime-tidyup-pregrasp-alignment:${EXACT_HEAD_SHA} \
+            bash -lc '
+              set -eo pipefail
+              source /opt/ros/humble/setup.bash
+              source /project/lib_ws/install/setup.bash
+              source /root/turtlebot3_ws/install/setup.bash
+
+              xacro /project/resource/turtlebot3_lime.urdf.xacro use_sim:=true \
+                > /artifacts/turtlebot3_lime_pregrasp_alignment.urdf
+              bringup_share="$(ros2 pkg prefix --share turtlebot3_lime_bringup)"
+              moveit_share="$(ros2 pkg prefix --share turtlebot3_lime_moveit_config)"
+              cp "${bringup_share}/config/gazebo_controller_manager.yaml" \
+                /artifacts/gazebo_controller_manager.yaml
+              cp "${moveit_share}/config/turtlebot3_lime.srdf" \
+                /artifacts/turtlebot3_lime.srdf
+
+              python3 /root/bin/find_rubiks_pregrasp_alignment.py \
+                --urdf /artifacts/turtlebot3_lime_pregrasp_alignment.urdf \
+                --controller-yaml /artifacts/gazebo_controller_manager.yaml \
+                --output /artifacts/rubiks_pregrasp_alignment_search.json \
+                --states-tsv /artifacts/rubiks_pregrasp_alignment_states.tsv \
+                --source-ref "${SOURCE_REF}"
+
+              colcon build \
+                --merge-install \
+                --base-paths /project/rubiks_self_collision_ws/src \
+                --build-base /tmp/rubiks_pregrasp_collision_build \
+                --install-base /tmp/rubiks_pregrasp_collision_install \
+                --cmake-args -DCMAKE_BUILD_TYPE=Release \
+                --event-handlers console_direct+
+              source /tmp/rubiks_pregrasp_collision_install/setup.bash
+
+              /tmp/rubiks_pregrasp_collision_install/lib/rubiks_self_collision_preflight/rubiks_self_collision_preflight \
+                /artifacts/turtlebot3_lime_pregrasp_alignment.urdf \
+                /artifacts/turtlebot3_lime.srdf \
+                /artifacts/rubiks_pregrasp_alignment_states.tsv \
+                /artifacts/rubiks_pregrasp_alignment_collision_results.tsv
+
+              python3 /root/bin/summarize_rubiks_pregrasp_state_alignment.py \
+                --search-summary /artifacts/rubiks_pregrasp_alignment_search.json \
+                --states-tsv /artifacts/rubiks_pregrasp_alignment_states.tsv \
+                --collision-results /artifacts/rubiks_pregrasp_alignment_collision_results.tsv \
+                --urdf /artifacts/turtlebot3_lime_pregrasp_alignment.urdf \
+                --srdf /artifacts/turtlebot3_lime.srdf \
+                --controller-yaml /artifacts/gazebo_controller_manager.yaml \
+                --output /artifacts/rubiks_pregrasp_state_alignment_summary.json \
+                --manifest /artifacts/rubiks_pregrasp_state_alignment_evidence.manifest.json \
+                --source-ref "${SOURCE_REF}"
+            ' >artifacts/pregrasp_alignment.stdout.log \
+              2>artifacts/pregrasp_alignment.stderr.log
+
+      - name: Validate exact-head pregrasp evidence and safety boundary
+        run: |
+          test -s artifacts/rubiks_pregrasp_state_alignment_summary.json
+          test -s artifacts/rubiks_pregrasp_state_alignment_evidence.manifest.json
+          python3 - <<'PY'
+          import json
+          import math
+          import os
+          from pathlib import Path
+
+          expected_head = os.environ['EXACT_HEAD_SHA']
+          summary = json.loads(Path('artifacts/rubiks_pregrasp_state_alignment_summary.json').read_text())
+          manifest = json.loads(Path('artifacts/rubiks_pregrasp_state_alignment_evidence.manifest.json').read_text())
+          if summary.get('passed') is not True:
+              raise SystemExit(summary.get('errors'))
+          if summary.get('source_ref') != expected_head:
+              raise SystemExit('summary is not bound to exact PR head')
+          if manifest.get('source_ref') != expected_head or manifest.get('exact_head_bound') is not True:
+              raise SystemExit('manifest is not bound to exact PR head')
+          if summary.get('decision') != 'PREGRASP_CANDIDATE_READY_FOR_NEW_SIMULATION_FIXTURE_EVIDENCE':
+              raise SystemExit('unexpected phase decision')
+
+          search = summary.get('search', {})
+          coverage = search.get('search_coverage', {})
+          if coverage.get('candidate_count') != 28561:
+              raise SystemExit('structured grid coverage mismatch')
+          if coverage.get('globally_nearest_claimed') is not False:
+              raise SystemExit('global nearest must not be claimed')
+          if int(coverage.get('finite_condition_count', 0)) <= 0 or int(coverage.get('correction_feasible_count', 0)) <= 0:
+              raise SystemExit('structured search produced no usable candidates')
+
+          candidate = search.get('selected_candidate', {})
+          positions = candidate.get('joint_positions_deg', {})
+          if sorted(positions) != [f'joint{i}' for i in range(1, 7)]:
+              raise SystemExit('candidate joint vector is incomplete')
+          if all(math.isclose(float(value), 0.0, abs_tol=1e-12) for value in positions.values()):
+              raise SystemExit('candidate remained at singular zero state')
+          for value in positions.values():
+              scaled = float(value) / 2.5
+              if abs(float(value)) > 15.0 + 1e-9 or not math.isclose(scaled, round(scaled), abs_tol=1e-9):
+                  raise SystemExit('candidate is outside declared structured grid')
+          if float(candidate.get('jacobian_condition_number', 1e9)) > 250.0:
+              raise SystemExit('candidate exceeds condition limit')
+          if candidate.get('effective_limits_with_margin') is not True or candidate.get('pre_fixture_posture_only') is not True:
+              raise SystemExit('candidate boundary is invalid')
+
+          matrix = summary.get('collision_matrix', {})
+          if matrix.get('state_count') != 107:
+              raise SystemExit('unexpected collision matrix size')
+          if matrix.get('transition_sample_count') != 100 or matrix.get('correction_endpoint_count') != 6:
+              raise SystemExit('transition/correction coverage mismatch')
+          if matrix.get('configured_state_checked') is not True or matrix.get('candidate_checked') is not True:
+              raise SystemExit('configured state or candidate was not checked')
+          if matrix.get('all_bounds_ok') is not True or matrix.get('all_self_collision_free') is not True:
+              raise SystemExit('pregrasp state matrix is invalid')
+          if matrix.get('maximum_contact_pair_count') != 0:
+              raise SystemExit('self-collision contacts were reported')
+
+          envelope = summary.get('verified_envelope', {})
+          if envelope.get('environment_collision_status') != 'unknown_no_world_objects_added':
+              raise SystemExit('environment state must remain unknown')
+          if envelope.get('environment_collision_lateral_m') != 0.0 or envelope.get('environment_collision_yaw_rad') != 0.0:
+              raise SystemExit('environment collision envelope must remain zero')
+          if summary.get('next_required_phase') != 'RUBIK-PREGRASP-SIMULATION-STATE-EVIDENCE':
+              raise SystemExit('unexpected next phase')
+
+          safety = summary.get('safety', {})
+          if safety.get('offline_only') is not True or safety.get('globally_nearest_claimed') is not False:
+              raise SystemExit('offline/search claim boundary is invalid')
+          for key in (
+              'ros_node_created', 'controller_loaded', 'planning_request_created',
+              'trajectory_instantiated', 'environment_collision_checked',
+              'arm_command_sent', 'gripper_command_sent', 'gazebo_motion_performed',
+              'actuation_authorized', 'production_runtime_modified',
+          ):
+              if safety.get(key) is not False:
+                  raise SystemExit(f'{key} must remain false')
+          if summary.get('rollback', {}).get('behavior') != 'deterministic_no_op':
+              raise SystemExit('rollback must remain deterministic no-op')
+          print(json.dumps(summary, indent=2, sort_keys=True))
+          PY
+
+      - name: Upload pregrasp alignment evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-pregrasp-state-alignment-evidence
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
