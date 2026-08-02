@@ -179,7 +179,7 @@ int main(int argc, char** argv)
     }
     output << "META\t" << robot_model->getName() << "\tarm\t" << join(active_joints, ",") << "\t"
            << join(missing_geometry, ",") << "\t" << (adjacent_entry_present ? "true" : "false") << "\t"
-           << (adjacent_allowed ? "true" : "false") << "\t" << states.size() << "\n";
+           << (adjacent_allowed ? "true" : "false") << "\n";
 
     collision_detection::CollisionRequest request;
     request.group_name = "arm";
