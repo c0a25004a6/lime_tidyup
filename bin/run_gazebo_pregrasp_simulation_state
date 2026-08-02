@@ -51,37 +51,13 @@ ros2_action_available() {
 }
 
 validate_world_properties() {
-  local source_file="$1"
-  local output_file="$2"
-  python3 - "${source_file}" "${output_file}" "${MODEL_NAME}" <<'PY'
-from __future__ import annotations
-import json
-import sys
-from pathlib import Path
-
-lines = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
-try:
-    start = next(index for index, line in enumerate(lines) if line.strip() == "Available models:")
-except StopIteration as error:
-    raise SystemExit("Available models section missing from gz model --list") from error
-models = []
-for line in lines[start + 1:]:
-    value = line.strip()
-    if not value:
-        continue
-    if value.startswith("-"):
-        value = value[1:].strip()
-    models.append(value)
-expected = {"ground_plane", sys.argv[3]}
-if set(models) != expected:
-    raise SystemExit(f"unexpected world models: {models}; expected {sorted(expected)}")
-for forbidden in ("cube", "support", "fixture", "rubiks_dynamic", "ifra"):
-    if any(forbidden in name.lower() for name in models):
-        raise SystemExit(f"forbidden fixture model present: {models}")
-Path(sys.argv[2]).write_text(
-    json.dumps({"models": models, "expected_models": sorted(expected), "source": "gz model --list"}, indent=2, sort_keys=True) + "\n"
-)
-PY
+  local output_file="$1"
+  python3 /root/bin/capture_gazebo_model_states.py \
+    --topic /model_states \
+    --expected-model ground_plane \
+    --expected-model "${MODEL_NAME}" \
+    --output "${output_file}" \
+    --timeout 10.0
 }
 
 xacro /project/resource/turtlebot3_lime.urdf.xacro use_sim:=true >"${PRODUCTION_URDF}"
@@ -170,10 +146,7 @@ if grep -Eq 'gripper|wheel|diff_drive|base_controller' "${ARTIFACT_DIR}/pregrasp
   exit 6
 fi
 
-timeout 10 gz model --list >"${ARTIFACT_DIR}/pregrasp_world_properties_before.txt" 2>&1
-validate_world_properties \
-  "${ARTIFACT_DIR}/pregrasp_world_properties_before.txt" \
-  "${ARTIFACT_DIR}/pregrasp_world_models_before.json"
+validate_world_properties "${ARTIFACT_DIR}/pregrasp_world_models_before.json"
 
 set +e
 python3 /root/bin/run_rubiks_pregrasp_simulation_state.py \
@@ -189,10 +162,7 @@ set -e
 
 ros2 control list_controllers >"${ARTIFACT_DIR}/pregrasp_controllers_after.txt" || true
 ros2 action list >"${ARTIFACT_DIR}/pregrasp_actions_after.txt" 2>&1 || true
-timeout 10 gz model --list >"${ARTIFACT_DIR}/pregrasp_world_properties_after.txt" 2>&1
-validate_world_properties \
-  "${ARTIFACT_DIR}/pregrasp_world_properties_after.txt" \
-  "${ARTIFACT_DIR}/pregrasp_world_models_after.json"
+validate_world_properties "${ARTIFACT_DIR}/pregrasp_world_models_after.json"
 
 if grep -Eq 'gripper|wheel|diff_drive|base_controller' "${ARTIFACT_DIR}/pregrasp_controllers_after.txt"; then
   echo "forbidden controller appeared after trial" >&2
