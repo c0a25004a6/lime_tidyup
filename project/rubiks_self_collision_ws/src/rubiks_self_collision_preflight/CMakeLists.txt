@@ -6,6 +6,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(geometric_shapes REQUIRED)
 find_package(moveit_core REQUIRED)
 find_package(moveit_ros_planning REQUIRED)
 find_package(srdfdom REQUIRED)
@@ -21,7 +22,20 @@ ament_target_dependencies(
   urdf
 )
 
-install(TARGETS rubiks_self_collision_preflight
+add_executable(rubiks_fixture_collision_preflight src/rubiks_fixture_collision_preflight.cpp)
+target_compile_features(rubiks_fixture_collision_preflight PUBLIC cxx_std_17)
+ament_target_dependencies(
+  rubiks_fixture_collision_preflight
+  geometric_shapes
+  moveit_core
+  moveit_ros_planning
+  srdfdom
+  urdf
+)
+
+install(TARGETS
+  rubiks_self_collision_preflight
+  rubiks_fixture_collision_preflight
   DESTINATION lib/${PROJECT_NAME}
 )
 
