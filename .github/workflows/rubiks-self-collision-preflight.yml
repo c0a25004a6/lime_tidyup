@@ -6,7 +6,7 @@ on:
       - "bin/rubiks_kinematic_preflight.py"
       - "bin/write_rubiks_self_collision_states.py"
       - "bin/summarize_rubiks_self_collision_preflight.py"
-      - "project/resource/turtlebot3_lime_gripper_test.urdf.xacro"
+      - "project/resource/turtlebot3_lime.urdf.xacro"
       - "project/rubiks_self_collision_ws/**"
       - "doc/rubiks_self_collision_preflight.md"
       - "Dockerfile"
@@ -80,7 +80,7 @@ jobs:
               source /project/lib_ws/install/setup.bash
               source /root/turtlebot3_ws/install/setup.bash
 
-              xacro /project/resource/turtlebot3_lime_gripper_test.urdf.xacro > /artifacts/turtlebot3_lime_self_collision.urdf
+              xacro /project/resource/turtlebot3_lime.urdf.xacro use_sim:=true > /artifacts/turtlebot3_lime_self_collision.urdf
               bringup_share="$(ros2 pkg prefix --share turtlebot3_lime_bringup)"
               moveit_share="$(ros2 pkg prefix --share turtlebot3_lime_moveit_config)"
               cp "${bringup_share}/config/gazebo_controller_manager.yaml" /artifacts/gazebo_controller_manager.yaml
@@ -144,6 +144,8 @@ jobs:
               raise SystemExit('manifest is not bound to exact PR head')
 
           model = summary.get('model', {})
+          if model.get('robot_name') != 'turtlebot3_lime':
+              raise SystemExit('production URDF robot name was not used')
           if model.get('active_joint_order') != [f'joint{i}' for i in range(1, 7)]:
               raise SystemExit('MoveIt active arm order mismatch')
           if model.get('missing_collision_geometry') != []:
