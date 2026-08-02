@@ -1,0 +1,238 @@
+name: Rubik pregrasp supported fixture observation
+
+on:
+  pull_request:
+    paths:
+      - "bin/find_rubiks_pregrasp_alignment.py"
+      - "bin/run_rubiks_pregrasp_simulation_state.py"
+      - "bin/run_rubiks_pregrasp_supported_fixture_observation.py"
+      - "bin/run_gazebo_pregrasp_supported_fixture_observation"
+      - "bin/summarize_rubiks_pregrasp_supported_fixture_observation.py"
+      - "project/resource/turtlebot3_lime.urdf.xacro"
+      - "project/resource/turtlebot3_lime_gripper_test.urdf.xacro"
+      - "project/resource/gazebo_gripper_test_controller_manager.yaml"
+      - "project/resource/rubiks_dynamic_cube_supported_057.sdf"
+      - "project/resource/rubiks_cube_support_surface.sdf"
+      - "doc/rubiks_pregrasp_supported_fixture_observation.md"
+      - "Dockerfile"
+      - ".github/workflows/rubiks-pregrasp-supported-fixture-observation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rubiks-pregrasp-supported-fixture-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  supported-fixture-observation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXACT_HEAD_SHA }}
+
+      - name: Validate exact checkout and bounded fixture sources
+        run: |
+          test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
+          python3 -m py_compile \
+            bin/find_rubiks_pregrasp_alignment.py \
+            bin/run_rubiks_pregrasp_simulation_state.py \
+            bin/run_rubiks_pregrasp_supported_fixture_observation.py \
+            bin/summarize_rubiks_pregrasp_supported_fixture_observation.py
+          bash -n bin/run_gazebo_pregrasp_supported_fixture_observation
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          observer = Path('bin/run_rubiks_pregrasp_supported_fixture_observation.py').read_text(encoding='utf-8')
+          shell = Path('bin/run_gazebo_pregrasp_supported_fixture_observation').read_text(encoding='utf-8')
+          if observer.count('node.send_open_goal(') != 1:
+              raise SystemExit('observer must contain exactly one gripper-open send path')
+          for required in (
+              'post_fixture_arm_command_count', 'post_fixture_gripper_command_count',
+              'support_contact_ratio', 'unexpected_robot_contact_count',
+              'gripper_close_command_sent', 'environment_collision_checked',
+              'actuation_authorized',
+          ):
+              if required not in observer:
+                  raise SystemExit(f'observer lacks required evidence field: {required}')
+          for forbidden in (
+              'close_step_', 'lift_command', 'remove_support', 'IFRA_LinkAttacher',
+          ):
+              if forbidden in observer or forbidden in shell:
+                  raise SystemExit(f'fixture phase contains forbidden behavior: {forbidden}')
+          if shell.count('spawn_entity.py') != 1:
+              raise SystemExit('shell must directly spawn only the robot')
+          if shell.count('run_rubiks_pregrasp_simulation_state.py') != 1:
+              raise SystemExit('shell must perform exactly one bounded arm setup trial')
+          if shell.count('run_rubiks_pregrasp_supported_fixture_observation.py') != 1:
+              raise SystemExit('shell must perform exactly one fixture observation')
+
+          cube = ET.parse('project/resource/rubiks_dynamic_cube_supported_057.sdf').getroot()
+          cube_size = cube.findtext('.//collision/geometry/box/size')
+          cube_mass = cube.findtext('.//inertial/mass')
+          support = ET.parse('project/resource/rubiks_cube_support_surface.sdf').getroot()
+          support_size = support.findtext('.//collision/geometry/box/size')
+          if cube_size != '0.057 0.057 0.057' or cube_mass != '0.09':
+              raise SystemExit('canonical cube dimensions or mass changed')
+          if support_size != '0.075 0.040 0.010':
+              raise SystemExit('canonical support dimensions changed')
+          PY
+
+      - name: Build exact-head Lime image
+        run: docker build -t lime-tidyup-supported-fixture:${EXACT_HEAD_SHA} .
+
+      - name: Resolve deterministic candidate and exact test model
+        run: |
+          mkdir -p artifacts
+          docker run --rm \
+            -e SOURCE_REF="${EXACT_HEAD_SHA}" \
+            -v "$PWD/artifacts:/artifacts" \
+            lime-tidyup-supported-fixture:${EXACT_HEAD_SHA} \
+            bash -lc '
+              set -eo pipefail
+              source /opt/ros/humble/setup.bash
+              source /project/lib_ws/install/setup.bash
+              source /root/turtlebot3_ws/install/setup.bash
+
+              xacro /project/resource/turtlebot3_lime.urdf.xacro use_sim:=true \
+                > /artifacts/turtlebot3_lime_pregrasp_supported_fixture_production.urdf
+              xacro /project/resource/turtlebot3_lime_gripper_test.urdf.xacro \
+                > /artifacts/turtlebot3_lime_pregrasp_supported_fixture.urdf
+              bringup_share="$(ros2 pkg prefix --share turtlebot3_lime_bringup)"
+              cp "${bringup_share}/config/gazebo_controller_manager.yaml" \
+                /artifacts/gazebo_controller_manager.production.yaml
+              cp /project/resource/gazebo_gripper_test_controller_manager.yaml \
+                /artifacts/gazebo_controller_manager.test.yaml
+
+              python3 /root/bin/find_rubiks_pregrasp_alignment.py \
+                --urdf /artifacts/turtlebot3_lime_pregrasp_supported_fixture_production.urdf \
+                --controller-yaml /artifacts/gazebo_controller_manager.production.yaml \
+                --output /artifacts/rubiks_pregrasp_alignment_search.json \
+                --states-tsv /artifacts/rubiks_pregrasp_alignment_states.tsv \
+                --source-ref "${SOURCE_REF}"
+            ' >artifacts/supported_fixture.resolve.stdout.log \
+              2>artifacts/supported_fixture.resolve.stderr.log
+
+      - name: Align arm, open gripper, spawn and observe fixture
+        run: |
+          docker run --rm \
+            -v "$PWD/artifacts:/artifacts" \
+            lime-tidyup-supported-fixture:${EXACT_HEAD_SHA} \
+            bash /root/bin/run_gazebo_pregrasp_supported_fixture_observation /artifacts
+
+      - name: Summarize exact-head fixture evidence
+        run: |
+          python3 bin/summarize_rubiks_pregrasp_supported_fixture_observation.py \
+            --fixture-telemetry artifacts/rubiks_pregrasp_supported_fixture_observation_telemetry.json \
+            --arm-telemetry artifacts/rubiks_pregrasp_supported_fixture_arm_telemetry.json \
+            --search-summary artifacts/rubiks_pregrasp_alignment_search.json \
+            --controllers-before-arm artifacts/supported_fixture.controllers_before_arm.txt \
+            --controllers-before-fixture artifacts/supported_fixture.controllers_before_fixture.txt \
+            --controllers-after-fixture artifacts/supported_fixture.controllers_after_fixture.txt \
+            --urdf artifacts/turtlebot3_lime_pregrasp_supported_fixture.urdf \
+            --controller-yaml artifacts/gazebo_controller_manager.test.yaml \
+            --cube-sdf project/resource/rubiks_dynamic_cube_supported_057.sdf \
+            --support-sdf project/resource/rubiks_cube_support_surface.sdf \
+            --output artifacts/rubiks_pregrasp_supported_fixture_summary.json \
+            --manifest artifacts/rubiks_pregrasp_supported_fixture_evidence.manifest.json \
+            --source-ref "${EXACT_HEAD_SHA}"
+
+      - name: Validate supported fixture and safety boundary
+        run: |
+          test -s artifacts/rubiks_pregrasp_supported_fixture_summary.json
+          test -s artifacts/rubiks_pregrasp_supported_fixture_evidence.manifest.json
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          expected_head = os.environ['EXACT_HEAD_SHA']
+          summary = json.loads(Path('artifacts/rubiks_pregrasp_supported_fixture_summary.json').read_text())
+          manifest = json.loads(Path('artifacts/rubiks_pregrasp_supported_fixture_evidence.manifest.json').read_text())
+          if summary.get('passed') is not True:
+              raise SystemExit(summary.get('errors'))
+          if summary.get('source_ref') != expected_head:
+              raise SystemExit('summary is not exact-head bound')
+          if manifest.get('source_ref') != expected_head or manifest.get('exact_head_bound') is not True:
+              raise SystemExit('manifest is not exact-head bound')
+          if summary.get('decision') != 'SUPPORTED_FIXTURE_STATE_ESTABLISHED':
+              raise SystemExit('unexpected fixture decision')
+
+          commands = summary.get('setup_commands', {})
+          if commands.get('arm_goal_count') != 1 or commands.get('arm_action_status') != 4 or commands.get('arm_action_error_code') != 0:
+              raise SystemExit('bounded arm setup command did not succeed')
+          if commands.get('gripper_goal_count') != 1:
+              raise SystemExit('exactly one gripper-open command was not recorded')
+          if commands.get('post_fixture_arm_command_count') != 0 or commands.get('post_fixture_gripper_command_count') != 0:
+              raise SystemExit('a command was recorded after fixture spawn')
+
+          measured = summary.get('measured_state', {})
+          if max(abs(float(value)) for value in measured.get('arm_before_fixture_error_rad', [])) > 0.01:
+              raise SystemExit('arm was not at candidate before fixture spawn')
+          if max(abs(float(value)) for value in measured.get('arm_after_fixture_error_rad', [])) > 0.01:
+              raise SystemExit('arm drifted after fixture spawn')
+          drift = measured.get('link7_post_fixture_drift', {})
+          if float(drift.get('translation_m', 1e9)) > 0.002 or float(drift.get('rotation_rad', 1e9)) > 0.01:
+              raise SystemExit('link7 drift exceeded fixture limit')
+
+          fixture = summary.get('fixture', {})
+          if fixture.get('reference_frame') != 'turtlebot3_lime_gripper_test::link7':
+              raise SystemExit('fixture reference frame mismatch')
+          if fixture.get('support_pose_xyz_m') != [-0.019, 0.0, 0.0857]:
+              raise SystemExit('support transform mismatch')
+          if fixture.get('cube_pose_xyz_m') != [-0.019, 0.0, 0.1192]:
+              raise SystemExit('cube transform mismatch')
+          if float(fixture.get('support_contact_ratio', 0.0)) < 0.70:
+              raise SystemExit('support contact ratio is insufficient')
+          if int(fixture.get('support_contact_message_count', 0)) <= 0:
+              raise SystemExit('support contact was not observed')
+          if int(fixture.get('finger_contact_message_count', -1)) != 0:
+              raise SystemExit('cube contacted an open finger')
+          if int(fixture.get('unexpected_robot_contact_count', -1)) != 0:
+              raise SystemExit('cube contacted a non-finger robot collision')
+          if float(fixture.get('cube_final_linear_speed_m_s', 1e9)) > 0.02:
+              raise SystemExit('cube did not settle linearly')
+          if float(fixture.get('cube_final_angular_speed_rad_s', 1e9)) > 0.2:
+              raise SystemExit('cube did not settle angularly')
+          movement = fixture.get('cube_movement', {})
+          if float(movement.get('max_horizontal_displacement_m', 1e9)) > 0.003:
+              raise SystemExit('cube horizontal drift exceeded 3 mm')
+          if float(movement.get('max_rotation_rad', 1e9)) > 0.10:
+              raise SystemExit('cube rotation exceeded 0.10 rad')
+          if float(fixture.get('observation_duration_s', 0.0)) < 2.0:
+              raise SystemExit('fixture observation interval is too short')
+
+          if summary.get('next_required_phase') != 'RUBIK-CANDIDATE-FIXTURE-PLANNING-SCENE-EVIDENCE':
+              raise SystemExit('unexpected next phase')
+          safety = summary.get('safety', {})
+          if safety.get('simulation_only') is not True:
+              raise SystemExit('fixture evidence must remain simulation-only')
+          if safety.get('bounded_setup_arm_command_sent') is not True or safety.get('bounded_setup_gripper_open_command_sent') is not True:
+              raise SystemExit('bounded setup command evidence is missing')
+          for key in (
+              'post_fixture_arm_command_sent', 'post_fixture_gripper_command_sent',
+              'gripper_close_command_sent', 'lift_command_sent', 'support_removed',
+              'ifra_attachment_used', 'grasp_success_claimed',
+              'environment_collision_checked', 'physical_hardware_used',
+              'physical_hardware_ready_claimed', 'production_runtime_modified',
+              'actuation_authorized',
+          ):
+              if safety.get(key) is not False:
+                  raise SystemExit(f'{key} must remain false')
+          print(json.dumps(summary, indent=2, sort_keys=True))
+          PY
+
+      - name: Upload supported fixture evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-pregrasp-supported-fixture-evidence
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
