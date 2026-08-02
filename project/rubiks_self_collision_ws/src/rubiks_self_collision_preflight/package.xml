@@ -1,13 +1,14 @@
 <?xml version="1.0"?>
 <package format="3">
   <name>rubiks_self_collision_preflight</name>
-  <version>0.1.0</version>
-  <description>Command-free MoveIt Core self-collision evidence for Lime Rubik correction previews.</description>
+  <version>0.2.0</version>
+  <description>Command-free MoveIt Core self and fixture collision evidence for Lime Rubik correction previews.</description>
   <maintainer email="noreply@example.com">nekomario28</maintainer>
   <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 
+  <depend>geometric_shapes</depend>
   <depend>moveit_core</depend>
   <depend>moveit_ros_planning</depend>
   <depend>srdfdom</depend>
