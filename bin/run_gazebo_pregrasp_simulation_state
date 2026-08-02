@@ -50,10 +50,45 @@ ros2_action_available() {
   [[ "${padded}" == *$'\n'"$1"$'\n'* ]]
 }
 
+discover_model_states_topic() {
+  local label="$1"
+  local topics_file="${ARTIFACT_DIR}/pregrasp_topics_${label}.txt"
+  local selected_file="${ARTIFACT_DIR}/pregrasp_model_states_topic_${label}.txt"
+  local info_file="${ARTIFACT_DIR}/pregrasp_model_states_topic_info_${label}.txt"
+
+  timeout 10 ros2 topic list -t >"${topics_file}"
+  python3 - "${topics_file}" "${selected_file}" <<'PY'
+from __future__ import annotations
+import re
+import sys
+from pathlib import Path
+
+lines = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+matches = []
+for line in lines:
+    match = re.fullmatch(r"\s*(/\S+)\s+\[([^]]+)\]\s*", line)
+    if match is None:
+        continue
+    topic, type_name = match.groups()
+    if type_name == "gazebo_msgs/msg/ModelStates":
+        matches.append(topic)
+if len(matches) != 1:
+    raise SystemExit(f"expected exactly one gazebo_msgs/msg/ModelStates topic, found {matches}; listing={lines}")
+Path(sys.argv[2]).write_text(matches[0] + "\n", encoding="utf-8")
+PY
+
+  local topic
+  topic="$(tr -d '\r\n' <"${selected_file}")"
+  [[ -n "${topic}" ]]
+  timeout 10 ros2 topic info -v "${topic}" >"${info_file}"
+  printf '%s\n' "${topic}"
+}
+
 validate_world_properties() {
-  local output_file="$1"
+  local topic="$1"
+  local output_file="$2"
   python3 /root/bin/capture_gazebo_model_states.py \
-    --topic /model_states \
+    --topic "${topic}" \
     --expected-model ground_plane \
     --expected-model "${MODEL_NAME}" \
     --output "${output_file}" \
@@ -146,7 +181,10 @@ if grep -Eq 'gripper|wheel|diff_drive|base_controller' "${ARTIFACT_DIR}/pregrasp
   exit 6
 fi
 
-validate_world_properties "${ARTIFACT_DIR}/pregrasp_world_models_before.json"
+MODEL_STATES_TOPIC_BEFORE="$(discover_model_states_topic before)"
+validate_world_properties \
+  "${MODEL_STATES_TOPIC_BEFORE}" \
+  "${ARTIFACT_DIR}/pregrasp_world_models_before.json"
 
 set +e
 python3 /root/bin/run_rubiks_pregrasp_simulation_state.py \
@@ -162,7 +200,14 @@ set -e
 
 ros2 control list_controllers >"${ARTIFACT_DIR}/pregrasp_controllers_after.txt" || true
 ros2 action list >"${ARTIFACT_DIR}/pregrasp_actions_after.txt" 2>&1 || true
-validate_world_properties "${ARTIFACT_DIR}/pregrasp_world_models_after.json"
+MODEL_STATES_TOPIC_AFTER="$(discover_model_states_topic after)"
+if [[ "${MODEL_STATES_TOPIC_AFTER}" != "${MODEL_STATES_TOPIC_BEFORE}" ]]; then
+  echo "ModelStates topic changed during trial: before=${MODEL_STATES_TOPIC_BEFORE}, after=${MODEL_STATES_TOPIC_AFTER}" >&2
+  exit 8
+fi
+validate_world_properties \
+  "${MODEL_STATES_TOPIC_AFTER}" \
+  "${ARTIFACT_DIR}/pregrasp_world_models_after.json"
 
 if grep -Eq 'gripper|wheel|diff_drive|base_controller' "${ARTIFACT_DIR}/pregrasp_controllers_after.txt"; then
   echo "forbidden controller appeared after trial" >&2
