@@ -1,0 +1,206 @@
+name: Rubik command-free self-collision preflight
+
+on:
+  pull_request:
+    paths:
+      - "bin/rubiks_kinematic_preflight.py"
+      - "bin/summarize_rubiks_self_collision_preflight.py"
+      - "project/resource/turtlebot3_lime_gripper_test.urdf.xacro"
+      - "project/rubiks_self_collision_ws/**"
+      - "doc/rubiks_self_collision_preflight.md"
+      - "Dockerfile"
+      - ".github/workflows/rubiks-self-collision-preflight.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rubiks-self-collision-preflight-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  command-free-self-collision-preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXACT_HEAD_SHA }}
+
+      - name: Validate exact checkout and command-free sources
+        run: |
+          test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
+          python3 -m py_compile \
+            bin/rubiks_kinematic_preflight.py \
+            bin/summarize_rubiks_self_collision_preflight.py
+          python3 - <<'PY'
+          from pathlib import Path
+
+          cpp = Path('project/rubiks_self_collision_ws/src/rubiks_self_collision_preflight/src/rubiks_self_collision_preflight.cpp').read_text(encoding='utf-8')
+          summary = Path('bin/summarize_rubiks_self_collision_preflight.py').read_text(encoding='utf-8')
+          for token in (
+              'rclcpp', 'ActionClient', 'create_publisher', 'create_client',
+              'MoveGroupInterface', 'plan(', 'execute(', 'asyncExecute',
+              'FollowJointTrajectory', 'GripperCommand',
+          ):
+              if token in cpp:
+                  raise SystemExit(f'C++ checker contains a runtime command/planning path: {token}')
+          for required in (
+              'PlanningScene', 'checkSelfCollision', 'getAllowedCollisionMatrix',
+              'getActiveJointModelNames', 'getShapes', 'satisfiesBounds',
+          ):
+              if required not in cpp:
+                  raise SystemExit(f'C++ checker lacks required evidence operation: {required}')
+          for required in (
+              'self_collision_verified_lateral_m',
+              'environment_collision_status', 'unknown_not_checked',
+              'deterministic_no_op', 'actuation_authorized',
+          ):
+              if required not in summary:
+                  raise SystemExit(f'summarizer lacks required boundary: {required}')
+          PY
+
+      - name: Build exact-head Lime image
+        run: docker build -t lime-tidyup-self-collision:${EXACT_HEAD_SHA} .
+
+      - name: Run offline MoveIt Core self-collision matrix
+        run: |
+          mkdir -p artifacts
+          docker run --rm \
+            -e SOURCE_REF="${EXACT_HEAD_SHA}" \
+            -v "$PWD/artifacts:/artifacts" \
+            lime-tidyup-self-collision:${EXACT_HEAD_SHA} \
+            bash -lc '
+              set -eo pipefail
+              source /opt/ros/humble/setup.bash
+              source /project/lib_ws/install/setup.bash
+              source /root/turtlebot3_ws/install/setup.bash
+
+              xacro /project/resource/turtlebot3_lime_gripper_test.urdf.xacro > /artifacts/turtlebot3_lime_self_collision.urdf
+              bringup_share="$(ros2 pkg prefix --share turtlebot3_lime_bringup)"
+              moveit_share="$(ros2 pkg prefix --share turtlebot3_lime_moveit_config)"
+              cp "${bringup_share}/config/gazebo_controller_manager.yaml" /artifacts/gazebo_controller_manager.yaml
+              cp "${moveit_share}/config/turtlebot3_lime.srdf" /artifacts/turtlebot3_lime.srdf
+
+              python3 /root/bin/rubiks_kinematic_preflight.py \
+                --urdf /artifacts/turtlebot3_lime_self_collision.urdf \
+                --controller-yaml /artifacts/gazebo_controller_manager.yaml \
+                --output /artifacts/rubiks_kinematic_preflight_summary.json \
+                --manifest /artifacts/rubiks_kinematic_preflight_evidence.manifest.json \
+                --source-ref "${SOURCE_REF}"
+
+              python3 - <<"PY"
+              import json
+              from pathlib import Path
+              summary = json.loads(Path("/artifacts/rubiks_kinematic_preflight_summary.json").read_text())
+              rows = [("seed", summary["ik_method"]["seed_joint_positions_rad"])]
+              rows.extend((case["label"], case["preview_joint_positions_rad"]) for case in summary["accepted_observation_cases"])
+              Path("/artifacts/self_collision_states.tsv").write_text(
+                  "".join(label + "\\t" + "\\t".join(format(value, ".17g") for value in positions) + "\\n" for label, positions in rows)
+              )
+              PY
+
+              colcon build \
+                --base-paths /project/rubiks_self_collision_ws/src \
+                --build-base /tmp/rubiks_self_collision_build \
+                --install-base /tmp/rubiks_self_collision_install \
+                --cmake-args -DCMAKE_BUILD_TYPE=Release \
+                --event-handlers console_direct+
+              source /tmp/rubiks_self_collision_install/setup.bash
+
+              /tmp/rubiks_self_collision_install/lib/rubiks_self_collision_preflight/rubiks_self_collision_preflight \
+                /artifacts/turtlebot3_lime_self_collision.urdf \
+                /artifacts/turtlebot3_lime.srdf \
+                /artifacts/self_collision_states.tsv \
+                /artifacts/self_collision_results.tsv
+
+              python3 /root/bin/summarize_rubiks_self_collision_preflight.py \
+                --results-tsv /artifacts/self_collision_results.tsv \
+                --kinematic-summary /artifacts/rubiks_kinematic_preflight_summary.json \
+                --urdf /artifacts/turtlebot3_lime_self_collision.urdf \
+                --srdf /artifacts/turtlebot3_lime.srdf \
+                --output /artifacts/rubiks_self_collision_preflight_summary.json \
+                --manifest /artifacts/rubiks_self_collision_preflight_evidence.manifest.json \
+                --source-ref "${SOURCE_REF}"
+            ' >artifacts/self_collision_preflight.stdout.log \
+              2>artifacts/self_collision_preflight.stderr.log
+
+      - name: Validate exact-head collision evidence and safety boundary
+        run: |
+          test -s artifacts/rubiks_self_collision_preflight_summary.json
+          test -s artifacts/rubiks_self_collision_preflight_evidence.manifest.json
+          python3 - <<'PY'
+          import json
+          import math
+          import os
+          from pathlib import Path
+
+          expected_head = os.environ['EXACT_HEAD_SHA']
+          summary = json.loads(Path('artifacts/rubiks_self_collision_preflight_summary.json').read_text())
+          manifest = json.loads(Path('artifacts/rubiks_self_collision_preflight_evidence.manifest.json').read_text())
+          if summary.get('passed') is not True:
+              raise SystemExit(summary.get('errors'))
+          if summary.get('source_ref') != expected_head:
+              raise SystemExit('summary is not bound to exact PR head')
+          if manifest.get('source_ref') != expected_head or manifest.get('exact_head_bound') is not True:
+              raise SystemExit('manifest is not bound to exact PR head')
+
+          model = summary.get('model', {})
+          if model.get('active_joint_order') != [f'joint{i}' for i in range(1, 7)]:
+              raise SystemExit('MoveIt active arm order mismatch')
+          if model.get('missing_collision_geometry') != []:
+              raise SystemExit('required collision geometry is missing')
+          if model.get('adjacent_acm_entry_present') is not True or model.get('adjacent_acm_entry_allowed') is not True:
+              raise SystemExit('SRDF allowed-collision matrix was not applied')
+          if int(model.get('disabled_collision_entry_count', 0)) <= 0:
+              raise SystemExit('SRDF disabled-collision evidence is missing')
+
+          states = summary.get('states', [])
+          expected_labels = ['seed', 'center', 'minus_y', 'plus_y', 'minus_yaw', 'plus_yaw', 'mixed']
+          if [state.get('label') for state in states] != expected_labels:
+              raise SystemExit('self-collision state matrix mismatch')
+          for state in states:
+              if state.get('bounds_ok') is not True or state.get('self_collision') is not False:
+                  raise SystemExit(f"invalid state: {state}")
+              if state.get('contact_pair_count') != 0 or state.get('contact_pairs') != []:
+                  raise SystemExit(f"unexpected collision contact: {state}")
+
+          envelope = summary.get('verified_envelope', {})
+          if not math.isclose(envelope.get('self_collision_verified_lateral_m'), 0.0005, abs_tol=1e-12):
+              raise SystemExit('unexpected self-collision lateral envelope')
+          if not math.isclose(envelope.get('self_collision_verified_yaw_rad'), math.radians(1), abs_tol=1e-12):
+              raise SystemExit('unexpected self-collision yaw envelope')
+          if envelope.get('environment_collision_status') != 'unknown_not_checked':
+              raise SystemExit('environment collision must remain unknown')
+          if envelope.get('environment_collision_verified_lateral_m') != 0.0 or envelope.get('environment_collision_verified_yaw_rad') != 0.0:
+              raise SystemExit('environment collision envelope must remain zero')
+
+          safety = summary.get('safety', {})
+          if safety.get('offline_moveit_core_only') is not True or safety.get('self_collision_clearance_verified') is not True:
+              raise SystemExit('self-collision verification boundary is missing')
+          for key in (
+              'ros_node_created', 'service_client_created', 'publisher_created',
+              'action_client_created', 'controller_loaded', 'planning_request_created',
+              'trajectory_instantiated', 'arm_command_sent', 'gripper_command_sent',
+              'gazebo_motion_performed', 'support_removed', 'lift_command_sent',
+              'ifra_attachment_used', 'environment_collision_clearance_verified',
+              'actuation_authorized', 'production_runtime_modified',
+          ):
+              if safety.get(key) is not False:
+                  raise SystemExit(f'{key} must remain false')
+          if summary.get('rollback', {}).get('behavior') != 'deterministic_no_op':
+              raise SystemExit('rollback must remain deterministic no-op')
+          print(json.dumps(summary, indent=2, sort_keys=True))
+          PY
+
+      - name: Upload self-collision evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-self-collision-preflight-evidence
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
