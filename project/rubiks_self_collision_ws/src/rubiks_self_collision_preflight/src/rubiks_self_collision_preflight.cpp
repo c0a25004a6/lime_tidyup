@@ -155,9 +155,11 @@ int main(int argc, char** argv)
     }
 
     planning_scene::PlanningScene scene(robot_model);
-    bool adjacent_allowed = false;
+    collision_detection::AllowedCollision::Type adjacent_type = collision_detection::AllowedCollision::NEVER;
     const bool adjacent_entry_present =
-      scene.getAllowedCollisionMatrix().getEntry("link1", "link2", adjacent_allowed);
+      scene.getAllowedCollisionMatrix().getEntry("link1", "link2", adjacent_type);
+    const bool adjacent_allowed =
+      adjacent_entry_present && adjacent_type != collision_detection::AllowedCollision::NEVER;
 
     const auto states = read_states(argv[3], expected_joints.size());
     if (states.size() != 7)
