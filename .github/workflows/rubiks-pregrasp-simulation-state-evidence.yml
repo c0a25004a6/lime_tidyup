@@ -5,6 +5,7 @@ on:
     paths:
       - "bin/find_rubiks_pregrasp_alignment.py"
       - "bin/rubiks_kinematic_preflight.py"
+      - "bin/capture_gazebo_model_states.py"
       - "bin/run_rubiks_pregrasp_simulation_state.py"
       - "bin/run_gazebo_pregrasp_simulation_state"
       - "project/resource/turtlebot3_lime.urdf.xacro"
@@ -40,12 +41,14 @@ jobs:
           python3 -m py_compile \
             bin/find_rubiks_pregrasp_alignment.py \
             bin/rubiks_kinematic_preflight.py \
+            bin/capture_gazebo_model_states.py \
             bin/run_rubiks_pregrasp_simulation_state.py
           bash -n bin/run_gazebo_pregrasp_simulation_state
           python3 - <<'PY'
           from pathlib import Path
 
           telemetry = Path('bin/run_rubiks_pregrasp_simulation_state.py').read_text(encoding='utf-8')
+          capture = Path('bin/capture_gazebo_model_states.py').read_text(encoding='utf-8')
           runner = Path('bin/run_gazebo_pregrasp_simulation_state').read_text(encoding='utf-8')
           xacro = Path('project/resource/turtlebot3_lime_arm_motion_test.urdf.xacro').read_text(encoding='utf-8')
           controller = Path('project/resource/gazebo_arm_motion_test_controller_manager.yaml').read_text(encoding='utf-8')
@@ -60,6 +63,13 @@ jobs:
           ):
               if required not in telemetry:
                   raise SystemExit(f'telemetry lacks required evidence field: {required}')
+          for required in (
+              'ModelStates', 'ReliabilityPolicy.BEST_EFFORT',
+              'DurabilityPolicy.VOLATILE', 'exact_set_match',
+              'forbidden_model_present',
+          ):
+              if required not in capture:
+                  raise SystemExit(f'model-state capture lacks required gate: {required}')
           for forbidden in (
               'libgazebo_grasp_fix.so', 'librealsense_gazebo_plugin.so',
               'libgazebo_ros_diff_drive.so', 'libgazebo_ros_ray_sensor.so',
@@ -80,7 +90,9 @@ jobs:
               if required not in controller:
                   raise SystemExit(f'arm-only controller configuration lacks {required}')
           for required in (
-              "validate_world_properties", "'/gripper_controller/gripper_cmd'",
+              'discover_model_states_topic', 'ros2 topic list -t',
+              'gazebo_msgs/msg/ModelStates', 'ros2 topic info -v',
+              "'/gripper_controller/gripper_cmd'",
               "'/arm_controller/follow_joint_trajectory'",
               'run_rubiks_pregrasp_simulation_state.py',
           ):
@@ -177,9 +189,20 @@ jobs:
           require(evidence.get('joint_state_sample_count', 0) >= 100, 'joint-state evidence count too low')
           require(evidence.get('feedback_sample_count', 0) >= 10, 'feedback evidence count too low')
 
-          for name in ('pregrasp_world_models_before.json', 'pregrasp_world_models_after.json'):
+          world_topics = []
+          for label in ('before', 'after'):
+              name = f'pregrasp_world_models_{label}.json'
               models = json.loads((root / name).read_text())
               require(set(models.get('models', [])) == {'ground_plane', 'turtlebot3_lime_arm_motion_test'}, f'unexpected world models in {name}')
+              require(models.get('exact_set_match') is True, f'exact model-set flag missing in {name}')
+              require(models.get('forbidden_model_present') is False, f'forbidden model flag set in {name}')
+              qos = models.get('subscription_qos', {})
+              require(qos.get('reliability') == 'BEST_EFFORT', f'world-state QoS mismatch in {name}')
+              topic = (root / f'pregrasp_model_states_topic_{label}.txt').read_text().strip()
+              require(models.get('source_topic') == topic, f'world-state source mismatch in {name}')
+              world_topics.append(topic)
+          require(world_topics[0] == world_topics[1], 'ModelStates topic changed during the trial')
+
           for name in ('pregrasp_controllers_before.txt', 'pregrasp_controllers_after.txt'):
               text = (root / name).read_text()
               require('arm_controller' in text and 'active' in text, f'arm controller not active in {name}')
@@ -216,19 +239,27 @@ jobs:
               'pregrasp_controllers_after.txt',
               'pregrasp_world_models_before.json',
               'pregrasp_world_models_after.json',
+              'pregrasp_topics_before.txt',
+              'pregrasp_topics_after.txt',
+              'pregrasp_model_states_topic_before.txt',
+              'pregrasp_model_states_topic_after.txt',
+              'pregrasp_model_states_topic_info_before.txt',
+              'pregrasp_model_states_topic_info_after.txt',
           ):
               path = root / name
               require(path.is_file() and path.stat().st_size > 0, f'missing manifest input: {name}')
               inputs[name] = digest(path)
 
           manifest = {
-              'schema_version': 1,
+              'schema_version': 2,
               'phase': 'RUBIK-PREGRASP-SIMULATION-STATE-EVIDENCE',
               'source_ref': expected_head,
               'exact_head_bound': True,
               'summary': summary_path.name,
               'summary_sha256': digest(summary_path),
               'inputs': inputs,
+              'model_states_topic': world_topics[0],
+              'model_states_topic_stable': True,
               'simulation_only': True,
               'empty_scene_only': True,
               'candidate_goal_sent': True,
