@@ -1,0 +1,142 @@
+name: Rubik command-free kinematic preflight
+
+on:
+  push:
+    paths:
+      - "bin/rubiks_kinematic_preflight.py"
+      - "doc/rubiks_kinematic_preflight.md"
+      - "project/resource/turtlebot3_lime_gripper_test.urdf.xacro"
+      - "Dockerfile"
+      - ".github/workflows/rubiks-kinematic-preflight.yml"
+  pull_request:
+    paths:
+      - "bin/rubiks_kinematic_preflight.py"
+      - "doc/rubiks_kinematic_preflight.md"
+      - "project/resource/turtlebot3_lime_gripper_test.urdf.xacro"
+      - "Dockerfile"
+      - ".github/workflows/rubiks-kinematic-preflight.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rubiks-kinematic-preflight-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  command-free-kinematic-preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate command-free preflight harness
+        run: |
+          python3 -m py_compile bin/rubiks_kinematic_preflight.py
+          python3 - <<'PY'
+          from pathlib import Path
+          text = Path('bin/rubiks_kinematic_preflight.py').read_text(encoding='utf-8')
+          for token in (
+              'ActionClient(', 'create_publisher(', 'send_goal_async(',
+              'ros2 action send_goal', 'ros2 topic pub',
+              'controller_manager spawner', 'FollowJointTrajectory.Goal',
+              'JointTrajectory(',
+          ):
+              if token in text:
+                  raise SystemExit(f'preflight contains a command path: {token}')
+          for token in (
+              'damped_least_squares_geometric_jacobian',
+              'collision_verified_lateral_m', 'deterministic_no_op',
+              'actuation_authorized', 'arm_command_sent',
+              'gripper_command_sent',
+          ):
+              if token not in text:
+                  raise SystemExit(f'preflight lacks required evidence field: {token}')
+          PY
+
+      - name: Build current Lime image
+        run: docker build -t lime-tidyup-kinematic-preflight:${{ github.sha }} .
+
+      - name: Resolve exact model and run offline preflight
+        run: |
+          mkdir -p artifacts
+          docker run --rm \
+            -e SOURCE_REF="${{ github.sha }}" \
+            -v "$PWD/artifacts:/artifacts" \
+            lime-tidyup-kinematic-preflight:${{ github.sha }} \
+            bash -lc '
+              set -euo pipefail
+              source /opt/ros/humble/setup.bash
+              source /project/lib_ws/install/setup.bash
+              source /root/turtlebot3_ws/install/setup.bash
+              xacro /project/resource/turtlebot3_lime_gripper_test.urdf.xacro > /artifacts/turtlebot3_lime_kinematic_preflight.urdf
+              bringup_share="$(ros2 pkg prefix --share turtlebot3_lime_bringup)"
+              cp "${bringup_share}/config/gazebo_controller_manager.yaml" /artifacts/gazebo_controller_manager.yaml
+              python3 /root/bin/rubiks_kinematic_preflight.py \
+                --urdf /artifacts/turtlebot3_lime_kinematic_preflight.urdf \
+                --controller-yaml /artifacts/gazebo_controller_manager.yaml \
+                --output /artifacts/rubiks_kinematic_preflight_summary.json \
+                --manifest /artifacts/rubiks_kinematic_preflight_evidence.manifest.json \
+                --source-ref "${SOURCE_REF}"
+            ' >artifacts/kinematic_preflight.stdout.log \
+              2>artifacts/kinematic_preflight.stderr.log
+
+      - name: Validate exact-head evidence and safety boundary
+        run: |
+          test -s artifacts/rubiks_kinematic_preflight_summary.json
+          test -s artifacts/rubiks_kinematic_preflight_evidence.manifest.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          summary = json.loads(Path('artifacts/rubiks_kinematic_preflight_summary.json').read_text())
+          manifest = json.loads(Path('artifacts/rubiks_kinematic_preflight_evidence.manifest.json').read_text())
+          if summary.get('passed') is not True:
+              raise SystemExit(summary.get('errors'))
+          if summary.get('source_ref') != '${{ github.sha }}':
+              raise SystemExit('summary is not bound to exact workflow head')
+          if manifest.get('source_ref') != '${{ github.sha }}' or manifest.get('exact_head_bound') is not True:
+              raise SystemExit('manifest is not bound to exact workflow head')
+          chain = summary.get('arm_chain', {})
+          if chain.get('joint_count') != 6 or len(chain.get('joint_order', [])) != 6:
+              raise SystemExit('resolved arm chain must contain six joints')
+          controller = summary.get('controller', {})
+          if controller.get('joint_order_exact') is not True:
+              raise SystemExit('controller order must exactly match the URDF chain')
+          if controller.get('action_type') != 'control_msgs/action/FollowJointTrajectory':
+              raise SystemExit('unexpected action schema')
+          cases = summary.get('accepted_observation_cases', [])
+          if len(cases) != 6 or any(case.get('numerically_feasible') is not True for case in cases):
+              raise SystemExit('all accepted observation cases must pass numerical preflight')
+          if any(case.get('command_authorized') is not False for case in cases):
+              raise SystemExit('no case may authorize a command')
+          bounds = summary.get('bounds', {})
+          if bounds.get('collision_verified_lateral_m') != 0.0 or bounds.get('collision_verified_yaw_rad') != 0.0:
+              raise SystemExit('collision-verified actuation bounds must remain zero')
+          safety = summary.get('safety', {})
+          for key in (
+              'production_pose_estimator_claimed', 'controller_loaded',
+              'action_client_created', 'publisher_created',
+              'trajectory_instantiated', 'arm_command_sent',
+              'gripper_command_sent', 'support_removed', 'lift_command_sent',
+              'ifra_attachment_used', 'grasp_success_claimed',
+              'collision_clearance_verified', 'actuation_authorized',
+              'production_runtime_modified',
+          ):
+              if safety.get(key) is not False:
+                  raise SystemExit(f'{key} must remain false')
+          if safety.get('offline_only') is not True:
+              raise SystemExit('offline_only must remain true')
+          if summary.get('rollback', {}).get('behavior') != 'deterministic_no_op':
+              raise SystemExit('rollback must remain deterministic no-op')
+          print(json.dumps(summary, indent=2, sort_keys=True))
+          PY
+
+      - name: Upload command-free kinematic evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-kinematic-preflight-evidence
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
