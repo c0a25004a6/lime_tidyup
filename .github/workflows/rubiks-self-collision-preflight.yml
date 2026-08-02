@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "bin/rubiks_kinematic_preflight.py"
+      - "bin/write_rubiks_self_collision_states.py"
       - "bin/summarize_rubiks_self_collision_preflight.py"
       - "project/resource/turtlebot3_lime_gripper_test.urdf.xacro"
       - "project/rubiks_self_collision_ws/**"
@@ -35,6 +36,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
           python3 -m py_compile \
             bin/rubiks_kinematic_preflight.py \
+            bin/write_rubiks_self_collision_states.py \
             bin/summarize_rubiks_self_collision_preflight.py
           python3 - <<'PY'
           from pathlib import Path
@@ -92,16 +94,9 @@ jobs:
                 --manifest /artifacts/rubiks_kinematic_preflight_evidence.manifest.json \
                 --source-ref "${SOURCE_REF}"
 
-              python3 - <<"PY"
-              import json
-              from pathlib import Path
-              summary = json.loads(Path("/artifacts/rubiks_kinematic_preflight_summary.json").read_text())
-              rows = [("seed", summary["ik_method"]["seed_joint_positions_rad"])]
-              rows.extend((case["label"], case["preview_joint_positions_rad"]) for case in summary["accepted_observation_cases"])
-              Path("/artifacts/self_collision_states.tsv").write_text(
-                  "".join(label + "\\t" + "\\t".join(format(value, ".17g") for value in positions) + "\\n" for label, positions in rows)
-              )
-              PY
+              python3 /root/bin/write_rubiks_self_collision_states.py \
+                --kinematic-summary /artifacts/rubiks_kinematic_preflight_summary.json \
+                --output /artifacts/self_collision_states.tsv
 
               colcon build \
                 --base-paths /project/rubiks_self_collision_ws/src \
