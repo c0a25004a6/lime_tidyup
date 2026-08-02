@@ -1,0 +1,243 @@
+name: Rubik pregrasp simulation state evidence
+
+on:
+  pull_request:
+    paths:
+      - "bin/rubiks_kinematic_preflight.py"
+      - "bin/find_rubiks_pregrasp_alignment.py"
+      - "bin/run_rubiks_pregrasp_simulation_state.py"
+      - "bin/run_gazebo_pregrasp_simulation_state"
+      - "bin/summarize_rubiks_pregrasp_simulation_state.py"
+      - "project/resource/turtlebot3_lime.urdf.xacro"
+      - "project/resource/turtlebot3_lime_gripper_test.urdf.xacro"
+      - "project/resource/gazebo_gripper_test_controller_manager.yaml"
+      - "doc/rubiks_pregrasp_simulation_state_evidence.md"
+      - "Dockerfile"
+      - ".github/workflows/rubiks-pregrasp-simulation-state-evidence.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rubiks-pregrasp-simulation-state-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  bounded-simulation-state-evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXACT_HEAD_SHA }}
+
+      - name: Validate exact checkout and bounded simulation sources
+        run: |
+          test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
+          python3 -m py_compile \
+            bin/rubiks_kinematic_preflight.py \
+            bin/find_rubiks_pregrasp_alignment.py \
+            bin/run_rubiks_pregrasp_simulation_state.py \
+            bin/summarize_rubiks_pregrasp_simulation_state.py
+          bash -n bin/run_gazebo_pregrasp_simulation_state
+          python3 - <<'PY'
+          from pathlib import Path
+
+          runner = Path('bin/run_rubiks_pregrasp_simulation_state.py').read_text(encoding='utf-8')
+          shell = Path('bin/run_gazebo_pregrasp_simulation_state').read_text(encoding='utf-8')
+          test_controller = Path('project/resource/gazebo_gripper_test_controller_manager.yaml').read_text(encoding='utf-8')
+
+          if runner.count('send_goal_async(') != 1:
+              raise SystemExit('runner must contain exactly one arm goal send path')
+          for required in (
+              'FollowJointTrajectory', '/arm_controller/controller_state',
+              'goal_sent_count', 'maximum_final_joint_error_rad',
+              'link7_pose_comparison', 'cube_or_support_spawned',
+              'physical_hardware_ready_claimed', 'actuation_authorized',
+          ):
+              if required not in runner:
+                  raise SystemExit(f'runner lacks required evidence field: {required}')
+          for forbidden in (
+              'GripperCommand', 'gripper_cmd', 'IFRA_LinkAttacher',
+              'rubiks_dynamic_cube_supported_057.sdf',
+              'rubiks_cube_support_surface.sdf',
+          ):
+              if forbidden in runner or forbidden in shell:
+                  raise SystemExit(f'simulation trial contains forbidden path: {forbidden}')
+          if shell.count('spawn_entity.py') != 1:
+              raise SystemExit('shell must spawn exactly the robot and no fixture object')
+          for required in (
+              'spawner arm_controller', '! grep -q \'gripper_controller.*active\'',
+              'joint_state_broadcaster',
+          ):
+              if required not in shell:
+                  raise SystemExit(f'shell lacks controller boundary: {required}')
+          for required in (
+              'joint_trajectory_controller/JointTrajectoryController',
+              'joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6',
+              'allow_partial_joints_goal: false',
+          ):
+              if required not in test_controller:
+                  raise SystemExit(f'test-only controller config lacks {required}')
+          PY
+
+      - name: Build exact-head Lime image
+        run: docker build -t lime-tidyup-pregrasp-simulation:${EXACT_HEAD_SHA} .
+
+      - name: Resolve exact models and deterministic target
+        run: |
+          mkdir -p artifacts
+          docker run --rm \
+            -e SOURCE_REF="${EXACT_HEAD_SHA}" \
+            -v "$PWD/artifacts:/artifacts" \
+            lime-tidyup-pregrasp-simulation:${EXACT_HEAD_SHA} \
+            bash -lc '
+              set -eo pipefail
+              source /opt/ros/humble/setup.bash
+              source /project/lib_ws/install/setup.bash
+              source /root/turtlebot3_ws/install/setup.bash
+
+              xacro /project/resource/turtlebot3_lime.urdf.xacro use_sim:=true \
+                > /artifacts/turtlebot3_lime_pregrasp_simulation_production.urdf
+              xacro /project/resource/turtlebot3_lime_gripper_test.urdf.xacro \
+                > /artifacts/turtlebot3_lime_pregrasp_simulation_test.urdf
+
+              bringup_share="$(ros2 pkg prefix --share turtlebot3_lime_bringup)"
+              cp "${bringup_share}/config/gazebo_controller_manager.yaml" \
+                /artifacts/gazebo_controller_manager.production.yaml
+              cp /project/resource/gazebo_gripper_test_controller_manager.yaml \
+                /artifacts/gazebo_controller_manager.test.yaml
+
+              python3 /root/bin/rubiks_kinematic_preflight.py \
+                --urdf /artifacts/turtlebot3_lime_pregrasp_simulation_production.urdf \
+                --controller-yaml /artifacts/gazebo_controller_manager.production.yaml \
+                --output /artifacts/pregrasp_simulation.production_kinematic.json \
+                --manifest /artifacts/pregrasp_simulation.production_kinematic.manifest.json \
+                --source-ref "${SOURCE_REF}"
+
+              python3 /root/bin/rubiks_kinematic_preflight.py \
+                --urdf /artifacts/turtlebot3_lime_pregrasp_simulation_test.urdf \
+                --controller-yaml /artifacts/gazebo_controller_manager.test.yaml \
+                --output /artifacts/pregrasp_simulation.test_kinematic.json \
+                --manifest /artifacts/pregrasp_simulation.test_kinematic.manifest.json \
+                --source-ref "${SOURCE_REF}"
+
+              python3 /root/bin/find_rubiks_pregrasp_alignment.py \
+                --urdf /artifacts/turtlebot3_lime_pregrasp_simulation_production.urdf \
+                --controller-yaml /artifacts/gazebo_controller_manager.production.yaml \
+                --output /artifacts/rubiks_pregrasp_alignment_search.json \
+                --states-tsv /artifacts/rubiks_pregrasp_alignment_states.tsv \
+                --source-ref "${SOURCE_REF}"
+            ' >artifacts/pregrasp_simulation.resolve.stdout.log \
+              2>artifacts/pregrasp_simulation.resolve.stderr.log
+
+      - name: Run one bounded empty-scene arm trajectory
+        run: |
+          docker run --rm \
+            -v "$PWD/artifacts:/artifacts" \
+            lime-tidyup-pregrasp-simulation:${EXACT_HEAD_SHA} \
+            bash /root/bin/run_gazebo_pregrasp_simulation_state /artifacts
+
+      - name: Summarize exact-head simulation evidence
+        run: |
+          python3 bin/summarize_rubiks_pregrasp_simulation_state.py \
+            --telemetry artifacts/rubiks_pregrasp_simulation_state_telemetry.json \
+            --search-summary artifacts/rubiks_pregrasp_alignment_search.json \
+            --production-kinematic-summary artifacts/pregrasp_simulation.production_kinematic.json \
+            --test-kinematic-summary artifacts/pregrasp_simulation.test_kinematic.json \
+            --production-urdf artifacts/turtlebot3_lime_pregrasp_simulation_production.urdf \
+            --test-urdf artifacts/turtlebot3_lime_pregrasp_simulation_test.urdf \
+            --production-controller-yaml artifacts/gazebo_controller_manager.production.yaml \
+            --test-controller-yaml artifacts/gazebo_controller_manager.test.yaml \
+            --controllers-before artifacts/pregrasp_simulation.controllers_before.txt \
+            --controllers-after artifacts/pregrasp_simulation.controllers_after.txt \
+            --output artifacts/rubiks_pregrasp_simulation_state_summary.json \
+            --manifest artifacts/rubiks_pregrasp_simulation_state_evidence.manifest.json \
+            --source-ref "${EXACT_HEAD_SHA}"
+
+      - name: Validate simulation state and safety boundary
+        run: |
+          test -s artifacts/rubiks_pregrasp_simulation_state_summary.json
+          test -s artifacts/rubiks_pregrasp_simulation_state_evidence.manifest.json
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          expected_head = os.environ['EXACT_HEAD_SHA']
+          summary = json.loads(Path('artifacts/rubiks_pregrasp_simulation_state_summary.json').read_text())
+          manifest = json.loads(Path('artifacts/rubiks_pregrasp_simulation_state_evidence.manifest.json').read_text())
+          if summary.get('passed') is not True:
+              raise SystemExit(summary.get('errors'))
+          if summary.get('source_ref') != expected_head:
+              raise SystemExit('summary is not exact-head bound')
+          if manifest.get('source_ref') != expected_head or manifest.get('exact_head_bound') is not True:
+              raise SystemExit('manifest is not exact-head bound')
+          if summary.get('decision') != 'PREGRASP_SIMULATION_STATE_ESTABLISHED':
+              raise SystemExit('unexpected simulation-state decision')
+
+          equivalence = summary.get('model_equivalence', {})
+          if equivalence.get('arm_signature_equal') is not True:
+              raise SystemExit('production/test arm signatures differ')
+          if equivalence.get('joint_order') != [f'joint{i}' for i in range(1, 7)]:
+              raise SystemExit('arm joint order mismatch')
+
+          tracking = summary.get('tracking', {})
+          if tracking.get('goal_sent_count') != 1:
+              raise SystemExit('exactly one arm goal was not sent')
+          if tracking.get('action_status') != 4 or tracking.get('action_error_code') != 0:
+              raise SystemExit('arm trajectory did not succeed')
+          if float(tracking.get('maximum_final_error_rad', 1e9)) > 0.01:
+              raise SystemExit('final arm tracking error exceeds 0.01 rad')
+          if int(tracking.get('joint_sample_count', 0)) < 30 or int(tracking.get('controller_sample_count', 0)) < 20:
+              raise SystemExit('insufficient tracking telemetry')
+
+          link7 = summary.get('link7', {})
+          comparison = link7.get('comparison', {})
+          if float(comparison.get('translation_error_norm_m', 1e9)) > 0.005:
+              raise SystemExit('link7 translation/FK mismatch exceeds 5 mm')
+          if float(comparison.get('rotation_error_rad', 1e9)) > 0.03:
+              raise SystemExit('link7 rotation/FK mismatch exceeds 0.03 rad')
+          if int(link7.get('sample_count', 0)) < 20:
+              raise SystemExit('insufficient link7 telemetry')
+
+          scene = summary.get('scene', {})
+          if scene.get('cube_or_support_spawned') is not False:
+              raise SystemExit('fixture object was spawned')
+          if scene.get('gripper_controller_loaded') is not False:
+              raise SystemExit('gripper controller was loaded')
+          if scene.get('environment_collision_checked') is not False:
+              raise SystemExit('environment collision boundary changed')
+          if summary.get('next_required_phase') != 'RUBIK-PREGRASP-SUPPORTED-FIXTURE-OBSERVATION':
+              raise SystemExit('unexpected next phase')
+
+          safety = summary.get('safety', {})
+          if safety.get('simulation_only') is not True or safety.get('bounded_simulation_arm_command_sent') is not True:
+              raise SystemExit('bounded simulation command evidence is missing')
+          for key in (
+              'physical_hardware_used', 'physical_hardware_ready_claimed',
+              'cube_or_support_spawned', 'gripper_controller_loaded',
+              'gripper_command_sent', 'lift_command_sent', 'support_removed',
+              'ifra_attachment_used', 'grasp_success_claimed',
+              'environment_collision_checked', 'production_runtime_modified',
+              'actuation_authorized',
+          ):
+              if safety.get(key) is not False:
+                  raise SystemExit(f'{key} must remain false')
+          rollback = summary.get('rollback', {})
+          if rollback.get('automatic_second_motion_sent') is not False or rollback.get('rollback_motion_claimed') is not False:
+              raise SystemExit('unverified rollback motion was claimed')
+          print(json.dumps(summary, indent=2, sort_keys=True))
+          PY
+
+      - name: Upload pregrasp simulation-state evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-pregrasp-simulation-state-evidence
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
