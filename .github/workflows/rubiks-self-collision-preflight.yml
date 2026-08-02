@@ -57,9 +57,8 @@ jobs:
               if required not in cpp:
                   raise SystemExit(f'C++ checker lacks required evidence operation: {required}')
           for required in (
-              'self_collision_verified_lateral_m',
-              'environment_collision_status', 'unknown_not_checked',
-              'deterministic_no_op', 'actuation_authorized',
+              'self_collision_verified_lateral_m', 'environment_collision_status',
+              'unknown_not_checked', 'deterministic_no_op', 'actuation_authorized',
           ):
               if required not in summary:
                   raise SystemExit(f'summarizer lacks required boundary: {required}')
@@ -99,6 +98,7 @@ jobs:
                 --output /artifacts/self_collision_states.tsv
 
               colcon build \
+                --merge-install \
                 --base-paths /project/rubiks_self_collision_ws/src \
                 --build-base /tmp/rubiks_self_collision_build \
                 --install-base /tmp/rubiks_self_collision_install \
@@ -154,8 +154,8 @@ jobs:
               raise SystemExit('SRDF disabled-collision evidence is missing')
 
           states = summary.get('states', [])
-          expected_labels = ['seed', 'center', 'minus_y', 'plus_y', 'minus_yaw', 'plus_yaw', 'mixed']
-          if [state.get('label') for state in states] != expected_labels:
+          labels = ['seed', 'center', 'minus_y', 'plus_y', 'minus_yaw', 'plus_yaw', 'mixed']
+          if [state.get('label') for state in states] != labels:
               raise SystemExit('self-collision state matrix mismatch')
           for state in states:
               if state.get('bounds_ok') is not True or state.get('self_collision') is not False:
