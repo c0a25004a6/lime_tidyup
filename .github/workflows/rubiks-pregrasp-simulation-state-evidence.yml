@@ -1,0 +1,252 @@
+name: Rubik pregrasp simulation-state evidence
+
+on:
+  pull_request:
+    paths:
+      - "bin/find_rubiks_pregrasp_alignment.py"
+      - "bin/rubiks_kinematic_preflight.py"
+      - "bin/run_rubiks_pregrasp_simulation_state.py"
+      - "bin/run_gazebo_pregrasp_simulation_state"
+      - "project/resource/turtlebot3_lime.urdf.xacro"
+      - "project/resource/turtlebot3_lime_arm_motion_test.urdf.xacro"
+      - "project/resource/gazebo_arm_motion_test_controller_manager.yaml"
+      - "project/resource/rubiks_grasp_calibration.world"
+      - "doc/rubiks_pregrasp_simulation_state_evidence.md"
+      - "Dockerfile"
+      - ".github/workflows/rubiks-pregrasp-simulation-state-evidence.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rubiks-pregrasp-simulation-state-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  bounded-empty-scene-arm-motion:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXACT_HEAD_SHA }}
+
+      - name: Validate exact checkout and bounded simulation sources
+        run: |
+          test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
+          python3 -m py_compile \
+            bin/find_rubiks_pregrasp_alignment.py \
+            bin/rubiks_kinematic_preflight.py \
+            bin/run_rubiks_pregrasp_simulation_state.py
+          bash -n bin/run_gazebo_pregrasp_simulation_state
+          python3 - <<'PY'
+          from pathlib import Path
+
+          telemetry = Path('bin/run_rubiks_pregrasp_simulation_state.py').read_text(encoding='utf-8')
+          runner = Path('bin/run_gazebo_pregrasp_simulation_state').read_text(encoding='utf-8')
+          xacro = Path('project/resource/turtlebot3_lime_arm_motion_test.urdf.xacro').read_text(encoding='utf-8')
+          controller = Path('project/resource/gazebo_arm_motion_test_controller_manager.yaml').read_text(encoding='utf-8')
+
+          for forbidden in ('GripperCommand', 'cmd_vel', 'IFRA_LinkAttacher', 'gazebo_grasp_fix'):
+              if forbidden in telemetry:
+                  raise SystemExit(f'telemetry contains forbidden command path: {forbidden}')
+          for required in (
+              'FollowJointTrajectory', 'candidate_arm_goal_sent',
+              'return_to_zero_goal_sent', 'gripper_command_sent',
+              'base_command_sent', 'physical_hardware_used',
+          ):
+              if required not in telemetry:
+                  raise SystemExit(f'telemetry lacks required evidence field: {required}')
+          for forbidden in (
+              'libgazebo_grasp_fix.so', 'librealsense_gazebo_plugin.so',
+              'libgazebo_ros_diff_drive.so', 'libgazebo_ros_ray_sensor.so',
+              'IFRA_LinkAttacher',
+          ):
+              if forbidden in xacro:
+                  raise SystemExit(f'test-only Xacro contains forbidden plugin: {forbidden}')
+          if 'libgazebo_ros2_control.so' not in xacro:
+              raise SystemExit('test-only Xacro lacks gazebo_ros2_control')
+          if 'gripper_controller' in controller:
+              raise SystemExit('arm-only controller configuration contains gripper controller')
+          if any(token in controller for token in ('diff_drive', 'wheel_controller', 'base_controller')):
+              raise SystemExit('arm-only controller configuration contains a base controller')
+          for required in (
+              'joint_state_broadcaster', 'arm_controller',
+              'joint_trajectory_controller/JointTrajectoryController',
+          ):
+              if required not in controller:
+                  raise SystemExit(f'arm-only controller configuration lacks {required}')
+          for required in (
+              "validate_world_properties", "'/gripper_controller/gripper_cmd'",
+              "'/arm_controller/follow_joint_trajectory'", 'return-to-zero',
+          ):
+              if required not in runner:
+                  raise SystemExit(f'runner lacks required gate: {required}')
+          PY
+
+      - name: Build exact-head Lime image
+        run: docker build -t lime-tidyup-pregrasp-simulation:${EXACT_HEAD_SHA} .
+
+      - name: Run bounded empty-scene arm motion
+        run: |
+          mkdir -p artifacts
+          docker run --rm \
+            -e SOURCE_REF="${EXACT_HEAD_SHA}" \
+            -v "$PWD/artifacts:/artifacts" \
+            lime-tidyup-pregrasp-simulation:${EXACT_HEAD_SHA} \
+            bash /root/bin/run_gazebo_pregrasp_simulation_state \
+              /artifacts "${EXACT_HEAD_SHA}"
+
+      - name: Validate exact-head simulation evidence and write manifest
+        run: |
+          test -s artifacts/rubiks_pregrasp_simulation_state_summary.json
+          test -s artifacts/rubiks_pregrasp_alignment_search.json
+          test -s artifacts/turtlebot3_lime_arm_motion_test.urdf
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import math
+          import os
+          from pathlib import Path
+
+          root = Path('artifacts')
+          expected_head = os.environ['EXACT_HEAD_SHA']
+          summary_path = root / 'rubiks_pregrasp_simulation_state_summary.json'
+          search_path = root / 'rubiks_pregrasp_alignment_search.json'
+          summary = json.loads(summary_path.read_text())
+          search = json.loads(search_path.read_text())
+
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(message)
+
+          def reject_nonfinite(value, path='root'):
+              if isinstance(value, float):
+                  require(math.isfinite(value), f'non-finite value at {path}')
+              elif isinstance(value, dict):
+                  for key, item in value.items():
+                      reject_nonfinite(item, f'{path}.{key}')
+              elif isinstance(value, list):
+                  for index, item in enumerate(value):
+                      reject_nonfinite(item, f'{path}[{index}]')
+
+          reject_nonfinite(summary)
+          require(summary.get('passed') is True, summary.get('errors'))
+          require(summary.get('errors') == [], 'simulation summary contains errors')
+          require(summary.get('source_ref') == expected_head, 'summary is not exact-head bound')
+          require(search.get('source_ref') == expected_head, 'candidate search is not exact-head bound')
+          require(summary.get('joint_order') == [f'joint{i}' for i in range(1, 7)], 'joint order mismatch')
+
+          expected_candidate = [0.0, 0.0, math.radians(10), 0.0, math.radians(-5), 0.0]
+          candidate = summary.get('candidate_joint_positions_rad', [])
+          require(len(candidate) == 6, 'candidate length mismatch')
+          require(all(math.isclose(a, b, rel_tol=0.0, abs_tol=1e-12) for a, b in zip(candidate, expected_candidate)), 'candidate mismatch')
+          selected = search.get('selected_candidate', {}).get('joint_positions_rad', {})
+          require([selected.get(f'joint{i}') for i in range(1, 7)] == candidate, 'telemetry/search candidate mismatch')
+
+          evidence = summary.get('evidence', {})
+          initial = evidence.get('initial', {})
+          require(initial.get('sample_count', 0) >= 20, 'insufficient initial samples')
+          require(initial.get('all_finite') is True, 'initial evidence is non-finite')
+          require(initial.get('max_abs_final_error_rad') <= 0.01, 'initial zero-state error exceeded')
+          require(initial.get('max_abs_velocity_rad_s') <= 0.02, 'initial velocity exceeded')
+          require(initial.get('max_position_range_rad') <= 0.005, 'initial stability exceeded')
+
+          for prefix in ('candidate', 'return'):
+              goal = evidence.get(f'{prefix}_goal', {})
+              feedback = evidence.get(f'{prefix}_feedback', {})
+              transition = evidence.get(f'{prefix}_transition', {})
+              hold = evidence.get(f'{prefix}_hold', {})
+              require(goal.get('accepted') is True and goal.get('succeeded') is True, f'{prefix} goal failed')
+              require(goal.get('status') == 4 and goal.get('error_code') == 0, f'{prefix} result mismatch')
+              require(feedback.get('sample_count', 0) >= 5, f'{prefix} feedback count too low')
+              require(feedback.get('valid_joint_order_count') == feedback.get('sample_count'), f'{prefix} feedback order mismatch')
+              require(feedback.get('max_abs_position_error_rad') <= 0.08, f'{prefix} feedback error exceeded')
+              require(transition.get('max_overshoot_rad') <= 0.02, f'{prefix} overshoot exceeded')
+              require(transition.get('max_nonmoving_drift_rad') <= 0.02, f'{prefix} nonmoving drift exceeded')
+              require(hold.get('sample_count', 0) >= 20, f'{prefix} hold count too low')
+              require(hold.get('all_finite') is True, f'{prefix} hold is non-finite')
+              require(hold.get('max_abs_final_error_rad') <= 0.01, f'{prefix} final error exceeded')
+              require(hold.get('max_abs_velocity_rad_s') <= 0.02, f'{prefix} hold velocity exceeded')
+              require(hold.get('max_position_range_rad') <= 0.005, f'{prefix} hold stability exceeded')
+
+          require(evidence.get('joint_state_sample_count', 0) >= 100, 'joint-state evidence count too low')
+          require(evidence.get('feedback_sample_count', 0) >= 10, 'feedback evidence count too low')
+
+          for name in ('pregrasp_world_models_before.json', 'pregrasp_world_models_after.json'):
+              models = json.loads((root / name).read_text())
+              require(set(models.get('models', [])) == {'ground_plane', 'turtlebot3_lime_arm_motion_test'}, f'unexpected world models in {name}')
+          for name in ('pregrasp_controllers_before.txt', 'pregrasp_controllers_after.txt'):
+              text = (root / name).read_text()
+              require('arm_controller' in text and 'active' in text, f'arm controller not active in {name}')
+              require('joint_state_broadcaster' in text, f'joint-state broadcaster missing in {name}')
+              require(not any(token in text for token in ('gripper', 'wheel', 'diff_drive', 'base_controller')), f'forbidden controller in {name}')
+
+          safety = summary.get('safety', {})
+          require(safety.get('simulation_only') is True, 'simulation-only flag missing')
+          require(safety.get('empty_scene_only') is True, 'empty-scene flag missing')
+          require(safety.get('arm_controller_loaded') is True, 'arm controller evidence missing')
+          require(safety.get('candidate_arm_goal_sent') is True, 'candidate goal evidence missing')
+          require(safety.get('return_to_zero_goal_sent') is True, 'return goal evidence missing')
+          for key in (
+              'physical_hardware_used', 'cube_spawned', 'support_spawned',
+              'fixture_spawned', 'ifra_attachment_used', 'grasp_fix_plugin_loaded',
+              'gripper_controller_loaded', 'gripper_command_sent',
+              'base_controller_loaded', 'base_command_sent', 'lift_command_sent',
+              'grasp_success_claimed', 'environment_clearance_claimed',
+              'hardware_readiness_claimed', 'production_runtime_modified',
+          ):
+              require(safety.get(key) is False, f'{key} must remain false')
+
+          def digest(path):
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+
+          inputs = {}
+          for name in (
+              'rubiks_pregrasp_alignment_search.json',
+              'rubiks_pregrasp_alignment_states.tsv',
+              'turtlebot3_lime_pregrasp_search.urdf',
+              'turtlebot3_lime_arm_motion_test.urdf',
+              'gazebo_controller_manager.production.yaml',
+              'pregrasp_controllers_before.txt',
+              'pregrasp_controllers_after.txt',
+              'pregrasp_world_models_before.json',
+              'pregrasp_world_models_after.json',
+          ):
+              path = root / name
+              require(path.is_file() and path.stat().st_size > 0, f'missing manifest input: {name}')
+              inputs[name] = digest(path)
+
+          manifest = {
+              'schema_version': 1,
+              'phase': 'RUBIK-PREGRASP-SIMULATION-STATE-EVIDENCE',
+              'source_ref': expected_head,
+              'exact_head_bound': True,
+              'summary': summary_path.name,
+              'summary_sha256': digest(summary_path),
+              'inputs': inputs,
+              'simulation_only': True,
+              'empty_scene_only': True,
+              'candidate_goal_sent': True,
+              'return_to_zero_goal_sent': True,
+              'gripper_command_sent': False,
+              'physical_hardware_used': False,
+              'production_runtime_modified': False,
+          }
+          (root / 'rubiks_pregrasp_simulation_state_evidence.manifest.json').write_text(
+              json.dumps(manifest, indent=2, sort_keys=True) + '\n'
+          )
+          print(json.dumps(summary, indent=2, sort_keys=True))
+          PY
+
+      - name: Upload bounded simulation-state evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-pregrasp-simulation-state-evidence
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
