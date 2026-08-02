@@ -1,0 +1,165 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+ARTIFACT_DIR="${1:-/artifacts}"
+mkdir -p "${ARTIFACT_DIR}"
+
+source /opt/ros/humble/setup.bash
+source /project/lib_ws/install/setup.bash
+source /root/turtlebot3_ws/install/setup.bash
+set -u
+
+export GAZEBO_MODEL_PATH="${GAZEBO_MODEL_PATH:-}:/root/.gazebo/models:/opt/ros/humble/share/turtlebot3_gazebo/models"
+export GAZEBO_PLUGIN_PATH="${GAZEBO_PLUGIN_PATH:-}:/opt/ros/humble/lib"
+
+MODEL_NAME="turtlebot3_lime_gripper_test"
+URDF_PATH="${ARTIFACT_DIR}/turtlebot3_lime_pregrasp_simulation_test.urdf"
+SEARCH_SUMMARY="${ARTIFACT_DIR}/rubiks_pregrasp_alignment_search.json"
+TELEMETRY="${ARTIFACT_DIR}/rubiks_pregrasp_simulation_state_telemetry.json"
+SERVER_LOG="${ARTIFACT_DIR}/rubiks_pregrasp_simulation_state.gzserver.log"
+RSP_LOG="${ARTIFACT_DIR}/rubiks_pregrasp_simulation_state.robot_state_publisher.log"
+
+cleanup() {
+  status=$?
+  for pid in "${GZSERVER_PID:-}" "${RSP_PID:-}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+      kill -INT "${pid}" 2>/dev/null || true
+    fi
+  done
+  sleep 2
+  for pid in "${GZSERVER_PID:-}" "${RSP_PID:-}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+      kill -TERM "${pid}" 2>/dev/null || true
+      wait "${pid}" 2>/dev/null || true
+    fi
+  done
+  exit "${status}"
+}
+trap cleanup EXIT INT TERM
+
+ros2_service_available() {
+  local service_type
+  service_type="$(timeout 5 ros2 service type "$1" 2>/dev/null)" || return 1
+  [[ -n "${service_type}" ]]
+}
+
+ros2_action_available() {
+  local output
+  local padded
+  output="$(timeout 5 ros2 action list 2>/dev/null)" || return 1
+  padded=$'\n'"${output}"$'\n'
+  [[ "${padded}" == *$'\n'"$1"$'\n'* ]]
+}
+
+test -s "${URDF_PATH}"
+test -s "${SEARCH_SUMMARY}"
+grep -q 'libgazebo_ros2_control.so' "${URDF_PATH}"
+! grep -q 'libgazebo_grasp_fix.so' "${URDF_PATH}"
+! grep -q 'librealsense_gazebo_plugin.so' "${URDF_PATH}"
+! grep -q 'libgazebo_ros_diff_drive.so' "${URDF_PATH}"
+! grep -q 'libgazebo_ros_ray_sensor.so' "${URDF_PATH}"
+
+ros2 run robot_state_publisher robot_state_publisher "${URDF_PATH}" \
+  --ros-args -p use_sim_time:=true \
+  >"${RSP_LOG}" 2>&1 &
+RSP_PID=$!
+sleep 2
+if ! kill -0 "${RSP_PID}" 2>/dev/null; then
+  cat "${RSP_LOG}"
+  exit 2
+fi
+
+gzserver /project/resource/rubiks_grasp_calibration.world \
+  -s libgazebo_ros_init.so \
+  -s libgazebo_ros_factory.so \
+  >"${SERVER_LOG}" 2>&1 &
+GZSERVER_PID=$!
+
+for _ in $(seq 1 90); do
+  if ros2_service_available '/spawn_entity'; then
+    break
+  fi
+  kill -0 "${GZSERVER_PID}" 2>/dev/null || { cat "${SERVER_LOG}"; exit 3; }
+  sleep 1
+done
+if ! ros2_service_available '/spawn_entity'; then
+  ros2 service list >"${ARTIFACT_DIR}/pregrasp_simulation.services_spawn_failure.txt" 2>&1 || true
+  cat "${SERVER_LOG}"
+  exit 3
+fi
+
+ros2 run gazebo_ros spawn_entity.py \
+  -entity "${MODEL_NAME}" \
+  -file "${URDF_PATH}" \
+  -x 0.0 -y 0.0 -z 0.03 -Y 0.0 \
+  >"${ARTIFACT_DIR}/pregrasp_simulation.robot_spawn.log" 2>&1
+
+for _ in $(seq 1 90); do
+  if ros2_service_available '/controller_manager/list_controllers'; then
+    break
+  fi
+  kill -0 "${GZSERVER_PID}" 2>/dev/null || { cat "${SERVER_LOG}"; exit 4; }
+  sleep 1
+done
+if ! ros2_service_available '/controller_manager/list_controllers'; then
+  ros2 service list >"${ARTIFACT_DIR}/pregrasp_simulation.services_controller_failure.txt" 2>&1 || true
+  cat "${SERVER_LOG}"
+  exit 4
+fi
+
+ros2 run controller_manager spawner joint_state_broadcaster \
+  --controller-manager /controller_manager \
+  >"${ARTIFACT_DIR}/pregrasp_simulation.joint_state_broadcaster.spawner.log" 2>&1
+ros2 run controller_manager spawner arm_controller \
+  --controller-manager /controller_manager \
+  >"${ARTIFACT_DIR}/pregrasp_simulation.arm_controller.spawner.log" 2>&1
+
+for _ in $(seq 1 60); do
+  if ros2_action_available '/arm_controller/follow_joint_trajectory'; then
+    break
+  fi
+  sleep 1
+done
+if ! ros2_action_available '/arm_controller/follow_joint_trajectory'; then
+  ros2 action list >"${ARTIFACT_DIR}/pregrasp_simulation.actions_failure.txt" 2>&1 || true
+  exit 5
+fi
+
+sleep 2
+ros2 topic list >"${ARTIFACT_DIR}/pregrasp_simulation.topics_before.txt"
+ros2 action list >"${ARTIFACT_DIR}/pregrasp_simulation.actions_before.txt"
+ros2 control list_controllers \
+  >"${ARTIFACT_DIR}/pregrasp_simulation.controllers_before.txt" 2>&1
+ros2 control list_hardware_interfaces \
+  >"${ARTIFACT_DIR}/pregrasp_simulation.hardware_interfaces.txt" 2>&1 || true
+
+grep -q 'arm_controller.*active' "${ARTIFACT_DIR}/pregrasp_simulation.controllers_before.txt"
+grep -q 'joint_state_broadcaster.*active' "${ARTIFACT_DIR}/pregrasp_simulation.controllers_before.txt"
+! grep -q 'gripper_controller.*active' "${ARTIFACT_DIR}/pregrasp_simulation.controllers_before.txt"
+
+set +e
+python3 /root/bin/run_rubiks_pregrasp_simulation_state.py \
+  --output "${TELEMETRY}" \
+  --search-summary "${SEARCH_SUMMARY}" \
+  --urdf "${URDF_PATH}" \
+  --action-name /arm_controller/follow_joint_trajectory \
+  --robot-model "${MODEL_NAME}" \
+  --trajectory-seconds 3.0 \
+  --settle-seconds 1.5 \
+  --stable-hold-seconds 1.0 \
+  --timeout 10.0 \
+  >"${ARTIFACT_DIR}/pregrasp_simulation.runner.stdout.json" \
+  2>"${ARTIFACT_DIR}/pregrasp_simulation.runner.stderr.log"
+RUN_STATUS=$?
+set -e
+
+ros2 topic list >"${ARTIFACT_DIR}/pregrasp_simulation.topics_after.txt" || true
+ros2 action list >"${ARTIFACT_DIR}/pregrasp_simulation.actions_after.txt" || true
+ros2 control list_controllers \
+  >"${ARTIFACT_DIR}/pregrasp_simulation.controllers_after.txt" 2>&1 || true
+
+test -s "${TELEMETRY}"
+grep -q 'arm_controller.*active' "${ARTIFACT_DIR}/pregrasp_simulation.controllers_after.txt"
+! grep -q 'gripper_controller.*active' "${ARTIFACT_DIR}/pregrasp_simulation.controllers_after.txt"
+
+exit "${RUN_STATUS}"
