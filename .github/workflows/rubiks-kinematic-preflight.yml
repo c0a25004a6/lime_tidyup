@@ -66,10 +66,11 @@ jobs:
             -v "$PWD/artifacts:/artifacts" \
             lime-tidyup-kinematic-preflight:${{ github.sha }} \
             bash -lc '
-              set -euo pipefail
+              set -eo pipefail
               source /opt/ros/humble/setup.bash
               source /project/lib_ws/install/setup.bash
               source /root/turtlebot3_ws/install/setup.bash
+              set -u
               xacro /project/resource/turtlebot3_lime_gripper_test.urdf.xacro > /artifacts/turtlebot3_lime_kinematic_preflight.urdf
               bringup_share="$(ros2 pkg prefix --share turtlebot3_lime_bringup)"
               cp "${bringup_share}/config/gazebo_controller_manager.yaml" /artifacts/gazebo_controller_manager.yaml
