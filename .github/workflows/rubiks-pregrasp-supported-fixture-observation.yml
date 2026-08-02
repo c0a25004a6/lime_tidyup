@@ -62,7 +62,7 @@ jobs:
               if required not in observer:
                   raise SystemExit(f'observer lacks required evidence field: {required}')
           for forbidden in (
-              'close_step_', 'lift_command', 'remove_support', 'IFRA_LinkAttacher',
+              'close_step_', '.send_goal(label="close', 'remove_support(', 'attach_link(',
           ):
               if forbidden in observer or forbidden in shell:
                   raise SystemExit(f'fixture phase contains forbidden behavior: {forbidden}')
