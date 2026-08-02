@@ -16,8 +16,8 @@ This phase checks only self-collision for the accepted kinematic seed and six pr
 
 The exact Lime Docker image is built from the PR head. Inside that image the workflow:
 
-1. expands the exact test-only Lime Xacro;
-2. copies the installed upstream SRDF;
+1. expands the exact production Lime Xacro with `use_sim:=true`, retaining robot name `turtlebot3_lime`;
+2. copies the installed upstream SRDF for the same robot name;
 3. regenerates the exact-head command-free kinematic summary;
 4. extracts the deterministic seed and six accepted preview joint states;
 5. builds a small C++ checker against the installed MoveIt Core and planning-scene libraries;
@@ -28,7 +28,9 @@ The exact Lime Docker image is built from the PR head. Inside that image the wor
 10. checks each state against MoveIt bounds and the SRDF allowed-collision matrix;
 11. records every colliding link pair and fails closed on any collision.
 
-`move_group`, planning services, action clients, controllers, publishers, Gazebo, and trajectory messages are not started or created.
+The earlier test-only Xacro has robot name `turtlebot3_lime_gripper_test`, while the canonical SRDF has robot name `turtlebot3_lime`. Rather than ignoring that semantic mismatch or rewriting the SRDF, this phase uses the production Xacro so the two canonical model names agree.
+
+`move_group`, planning services, action clients, controllers, publishers, Gazebo, and trajectory messages are not started or created. Gazebo plugin elements in the rendered URDF are parsed as description data only; no plugin is loaded.
 
 ## Tested envelope
 
@@ -58,6 +60,7 @@ It must not be generalized to the full proposal threshold, an interpolated traje
 The phase rejects on:
 
 - malformed URDF or SRDF;
+- mismatched URDF/SRDF robot names;
 - missing semantic `arm` group;
 - active-joint order mismatch;
 - missing collision geometry;
@@ -76,7 +79,7 @@ Rollback remains `deterministic_no_op`.
 - no publisher or action client;
 - no controller or planning request;
 - no trajectory message or execution;
-- no Gazebo motion;
+- no Gazebo motion or plugin loading;
 - no arm or gripper command;
 - no support removal or lift;
 - no IFRA attachment;
