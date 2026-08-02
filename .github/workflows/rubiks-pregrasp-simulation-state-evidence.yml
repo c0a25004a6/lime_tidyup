@@ -64,12 +64,16 @@ jobs:
               if required not in telemetry:
                   raise SystemExit(f'telemetry lacks required evidence field: {required}')
           for required in (
-              'ModelStates', 'ReliabilityPolicy.BEST_EFFORT',
-              'DurabilityPolicy.VOLATILE', 'exact_set_match',
-              'forbidden_model_present',
+              'ModelStates', 'MODEL_STATES_TYPE',
+              'get_topic_names_and_types', 'get_publishers_info_by_topic',
+              'ReliabilityPolicy.BEST_EFFORT', 'DurabilityPolicy.VOLATILE',
+              'rclpy_node_graph', 'exact_set_match', 'forbidden_model_present',
           ):
               if required not in capture:
                   raise SystemExit(f'model-state capture lacks required gate: {required}')
+          for forbidden in ('ros2 topic list', 'ros2 topic info'):
+              if forbidden in runner:
+                  raise SystemExit(f'runner still depends on ROS CLI graph daemon: {forbidden}')
           for forbidden in (
               'libgazebo_grasp_fix.so', 'librealsense_gazebo_plugin.so',
               'libgazebo_ros_diff_drive.so', 'libgazebo_ros_ray_sensor.so',
@@ -90,8 +94,7 @@ jobs:
               if required not in controller:
                   raise SystemExit(f'arm-only controller configuration lacks {required}')
           for required in (
-              'discover_model_states_topic', 'ros2 topic list -t',
-              'gazebo_msgs/msg/ModelStates', 'ros2 topic info -v',
+              'validate_world_properties', 'capture_gazebo_model_states.py',
               "'/gripper_controller/gripper_cmd'",
               "'/arm_controller/follow_joint_trajectory'",
               'run_rubiks_pregrasp_simulation_state.py',
@@ -193,14 +196,25 @@ jobs:
           for label in ('before', 'after'):
               name = f'pregrasp_world_models_{label}.json'
               models = json.loads((root / name).read_text())
+              require(models.get('schema_version') == 3, f'world-state schema mismatch in {name}')
               require(set(models.get('models', [])) == {'ground_plane', 'turtlebot3_lime_arm_motion_test'}, f'unexpected world models in {name}')
               require(models.get('exact_set_match') is True, f'exact model-set flag missing in {name}')
               require(models.get('forbidden_model_present') is False, f'forbidden model flag set in {name}')
+              require(models.get('pose_count') == 2 and models.get('twist_count') == 2, f'ModelStates dimensions mismatch in {name}')
               qos = models.get('subscription_qos', {})
               require(qos.get('reliability') == 'BEST_EFFORT', f'world-state QoS mismatch in {name}')
-              topic = (root / f'pregrasp_model_states_topic_{label}.txt').read_text().strip()
-              require(models.get('source_topic') == topic, f'world-state source mismatch in {name}')
-              world_topics.append(topic)
+              discovery = models.get('discovery', {})
+              require(discovery.get('api') == 'rclpy_node_graph', f'graph API mismatch in {name}')
+              require(discovery.get('required_type') == 'gazebo_msgs/msg/ModelStates', f'ModelStates type mismatch in {name}')
+              require(discovery.get('matching_topic_count') == 1, f'ModelStates topic uniqueness failure in {name}')
+              require(discovery.get('publisher_count', 0) >= 1, f'ModelStates publisher missing in {name}')
+              publishers = discovery.get('publishers', [])
+              require(len(publishers) == discovery.get('publisher_count'), f'publisher evidence count mismatch in {name}')
+              require(all(publisher.get('topic_type') == 'gazebo_msgs/msg/ModelStates' for publisher in publishers), f'publisher type mismatch in {name}')
+              graph = discovery.get('graph_snapshot', [])
+              source_topic = models.get('source_topic')
+              require(sum(1 for entry in graph if entry.get('topic') == source_topic and 'gazebo_msgs/msg/ModelStates' in entry.get('types', [])) == 1, f'discovered topic not represented exactly once in graph snapshot for {name}')
+              world_topics.append(source_topic)
           require(world_topics[0] == world_topics[1], 'ModelStates topic changed during the trial')
 
           for name in ('pregrasp_controllers_before.txt', 'pregrasp_controllers_after.txt'):
@@ -239,25 +253,20 @@ jobs:
               'pregrasp_controllers_after.txt',
               'pregrasp_world_models_before.json',
               'pregrasp_world_models_after.json',
-              'pregrasp_topics_before.txt',
-              'pregrasp_topics_after.txt',
-              'pregrasp_model_states_topic_before.txt',
-              'pregrasp_model_states_topic_after.txt',
-              'pregrasp_model_states_topic_info_before.txt',
-              'pregrasp_model_states_topic_info_after.txt',
           ):
               path = root / name
               require(path.is_file() and path.stat().st_size > 0, f'missing manifest input: {name}')
               inputs[name] = digest(path)
 
           manifest = {
-              'schema_version': 2,
+              'schema_version': 3,
               'phase': 'RUBIK-PREGRASP-SIMULATION-STATE-EVIDENCE',
               'source_ref': expected_head,
               'exact_head_bound': True,
               'summary': summary_path.name,
               'summary_sha256': digest(summary_path),
               'inputs': inputs,
+              'model_states_discovery_api': 'rclpy_node_graph',
               'model_states_topic': world_topics[0],
               'model_states_topic_stable': True,
               'simulation_only': True,
