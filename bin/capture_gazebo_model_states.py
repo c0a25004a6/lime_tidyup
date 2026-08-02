@@ -10,14 +10,19 @@ from pathlib import Path
 import rclpy
 from gazebo_msgs.msg import ModelStates
 from rclpy.node import Node
-from rclpy.qos import QoSProfile
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 
 
 class ModelStateCapture(Node):
     def __init__(self, topic: str) -> None:
         super().__init__("rubiks_gazebo_model_state_capture")
         self.message: ModelStates | None = None
-        qos = QoSProfile(depth=1)
+        qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+        )
         self.subscription = self.create_subscription(ModelStates, topic, self._callback, qos)
 
     def _callback(self, message: ModelStates) -> None:
@@ -27,7 +32,7 @@ class ModelStateCapture(Node):
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--topic", default="/model_states")
+    parser.add_argument("--topic", required=True)
     parser.add_argument("--expected-model", action="append", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--timeout", type=float, default=10.0)
@@ -35,17 +40,21 @@ def main() -> int:
 
     rclpy.init()
     node = ModelStateCapture(args.topic)
+    message: ModelStates | None = None
     try:
         deadline = time.monotonic() + args.timeout
         while rclpy.ok() and node.message is None and time.monotonic() < deadline:
             rclpy.spin_once(node, timeout_sec=0.1)
         if node.message is None:
             raise SystemExit(f"no ModelStates message received from {args.topic}")
-        names = [str(name) for name in node.message.name]
+        message = node.message
+        names = [str(name) for name in message.name]
     finally:
         node.destroy_node()
         rclpy.shutdown()
 
+    if message is None:
+        raise SystemExit("ModelStates capture ended without a message")
     if len(names) != len(set(names)):
         raise SystemExit(f"duplicate model names in ModelStates: {names}")
     expected = sorted(set(args.expected_model))
@@ -57,12 +66,18 @@ def main() -> int:
         raise SystemExit(f"forbidden fixture model present: {forbidden}")
 
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "source_topic": args.topic,
+        "subscription_qos": {
+            "history": "KEEP_LAST",
+            "depth": 1,
+            "reliability": "BEST_EFFORT",
+            "durability": "VOLATILE",
+        },
         "models": names,
         "expected_models": expected,
-        "pose_count": len(node.message.pose),
-        "twist_count": len(node.message.twist),
+        "pose_count": len(message.pose),
+        "twist_count": len(message.twist),
         "exact_set_match": True,
         "forbidden_model_present": False,
     }
