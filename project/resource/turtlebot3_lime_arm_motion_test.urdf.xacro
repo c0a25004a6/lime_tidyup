@@ -1,0 +1,66 @@
+<?xml version="1.0"?>
+<!--
+  Test-only TurtleBot3 Lime model for bounded empty-scene arm motion evidence.
+  Camera, depth, lidar, IMU, diff-drive, RealSense, grasp-fix, IFRA, gripper
+  controller, and rendering plugins are deliberately omitted.
+-->
+<robot name="turtlebot3_lime_arm_motion_test" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:arg name="prefix" default="" />
+  <xacro:arg name="use_sim" default="true" />
+  <xacro:arg name="use_fake_hardware" default="false" />
+  <xacro:arg name="fake_sensor_commands" default="false" />
+
+  <xacro:include filename="$(find turtlebot3_lime_description)/gazebo/materials.xacro" />
+  <xacro:include filename="$(find turtlebot3_lime_description)/urdf/turtlebot3_bigwheel_orin.urdf.xacro" />
+  <xacro:include filename="$(find turtlebot3_lime_description)/urdf/open_manipulator_sara.urdf.xacro" />
+  <xacro:include filename="$(find turtlebot3_lime_description)/gazebo/open_manipulator_sara.gazebo.xacro" />
+  <xacro:include filename="$(find turtlebot3_lime_description)/ros2_control/turtlebot3_lime_system.ros2_control.xacro" />
+
+  <xacro:turtlebot3_bigwheel_orin prefix="$(arg prefix)" />
+
+  <joint name="$(arg prefix)base_fixed" type="fixed">
+    <parent link="$(arg prefix)base_link" />
+    <child link="$(arg prefix)link1" />
+    <origin xyz="-0.036 0.0 0.07" rpy="0 0 0" />
+  </joint>
+
+  <xacro:open_manipulator_sara prefix="$(arg prefix)" />
+  <xacro:open_manipulator_sara_gazebo prefix="$(arg prefix)" />
+
+  <xacro:turtlebot3_lime_system
+    name="TurtleBot3LimeArmMotionTestSystem"
+    prefix="$(arg prefix)"
+    use_sim="$(arg use_sim)"
+    use_fake_hardware="$(arg use_fake_hardware)"
+    fake_sensor_commands="$(arg fake_sensor_commands)" />
+
+  <gazebo reference="$(arg prefix)base_link">
+    <material>Gazebo/DarkGrey</material>
+  </gazebo>
+  <gazebo reference="$(arg prefix)wheel_left_link">
+    <mu1>1.0</mu1><mu2>1.0</mu2><kp>500000.0</kp><kd>10.0</kd>
+    <minDepth>0.001</minDepth><maxVel>0.1</maxVel><fdir1>1 0 0</fdir1>
+    <material>Gazebo/Green</material>
+  </gazebo>
+  <gazebo reference="$(arg prefix)wheel_right_link">
+    <mu1>1.0</mu1><mu2>1.0</mu2><kp>500000.0</kp><kd>10.0</kd>
+    <minDepth>0.001</minDepth><maxVel>0.1</maxVel><fdir1>1 0 0</fdir1>
+    <material>Gazebo/Green</material>
+  </gazebo>
+  <gazebo reference="$(arg prefix)caster_back_left_link">
+    <mu1>0.1</mu1><mu2>0.1</mu2><kp>1000000.0</kp><kd>100.0</kd>
+    <minDepth>0.001</minDepth><maxVel>1.0</maxVel>
+    <material>Gazebo/FlatBlack</material>
+  </gazebo>
+  <gazebo reference="$(arg prefix)caster_back_right_link">
+    <mu1>0.1</mu1><mu2>0.1</mu2><kp>1000000.0</kp><kd>100.0</kd>
+    <minDepth>0.001</minDepth><maxVel>1.0</maxVel>
+    <material>Gazebo/FlatBlack</material>
+  </gazebo>
+
+  <gazebo>
+    <plugin name="gazebo_ros2_control" filename="libgazebo_ros2_control.so">
+      <parameters>/project/resource/gazebo_arm_motion_test_controller_manager.yaml</parameters>
+    </plugin>
+  </gazebo>
+</robot>
