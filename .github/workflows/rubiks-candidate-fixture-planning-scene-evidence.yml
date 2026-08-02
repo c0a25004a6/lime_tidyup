@@ -1,0 +1,237 @@
+name: Rubik candidate fixture planning scene evidence
+
+on:
+  pull_request:
+    paths:
+      - "bin/rubiks_kinematic_preflight.py"
+      - "bin/prepare_rubiks_candidate_fixture_planning_scene.py"
+      - "bin/summarize_rubiks_candidate_fixture_planning_scene.py"
+      - "project/resource/turtlebot3_lime.urdf.xacro"
+      - "project/rubiks_self_collision_ws/**"
+      - "doc/rubiks_candidate_fixture_planning_scene_evidence.md"
+      - "Dockerfile"
+      - ".github/workflows/rubiks-candidate-fixture-planning-scene-evidence.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: rubiks-candidate-fixture-planning-scene-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  command-free-fixture-planning-scene:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      ACCEPTED_ARTIFACT_ID: "8837821223"
+      ACCEPTED_ARTIFACT_SHA256: 0f25766bd5e94a10f459538dcbeb293f42af25b780e35ba3a48e270e0b3bcf48
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXACT_HEAD_SHA }}
+
+      - name: Validate exact checkout and command-free sources
+        run: |
+          test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
+          python3 -m py_compile \
+            bin/rubiks_kinematic_preflight.py \
+            bin/prepare_rubiks_candidate_fixture_planning_scene.py \
+            bin/summarize_rubiks_candidate_fixture_planning_scene.py
+          python3 - <<'PY'
+          from pathlib import Path
+
+          prepare = Path('bin/prepare_rubiks_candidate_fixture_planning_scene.py').read_text(encoding='utf-8')
+          checker = Path('project/rubiks_self_collision_ws/src/rubiks_self_collision_preflight/src/rubiks_fixture_collision_preflight.cpp').read_text(encoding='utf-8')
+          summary = Path('bin/summarize_rubiks_candidate_fixture_planning_scene.py').read_text(encoding='utf-8')
+          combined = prepare + checker + summary
+          for forbidden in (
+              'rclpy', 'rclcpp', 'ActionClient', 'create_publisher', 'create_client',
+              'MoveGroupInterface', 'FollowJointTrajectory', 'GripperCommand',
+              'controller_manager spawner', 'send_goal_async', 'ros2 topic pub',
+              'processCollisionObjectMsg',
+          ):
+              if forbidden in combined:
+                  raise SystemExit(f'planning-scene evidence contains a runtime/command path: {forbidden}')
+          for required in (
+              'getWorldNonConst()->addToObject', 'checkCollision',
+              'getGlobalLinkTransform("link7")', 'setVariablePositions(positions)',
+              'robot_object_acm_exemption_added', 'EXPECTED_STATE_COUNT = 601',
+              'actuation_authorized',
+          ):
+              if required not in combined:
+                  raise SystemExit(f'planning-scene evidence lacks required operation: {required}')
+          PY
+
+      - name: Download accepted supported-fixture artifact
+        run: |
+          mkdir -p artifacts
+          curl --fail --location --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ACCEPTED_ARTIFACT_ID}/zip" \
+            --output artifacts/rubiks-pregrasp-supported-fixture-evidence.zip
+          printf '%s  %s\n' \
+            "${ACCEPTED_ARTIFACT_SHA256}" \
+            artifacts/rubiks-pregrasp-supported-fixture-evidence.zip \
+            | sha256sum --check --strict
+
+      - name: Build exact-head Lime image
+        run: docker build -t lime-tidyup-fixture-planning-scene:${EXACT_HEAD_SHA} .
+
+      - name: Reconstruct and check offline planning scene
+        run: |
+          docker run --rm \
+            -e SOURCE_REF="${EXACT_HEAD_SHA}" \
+            -v "$PWD/artifacts:/artifacts" \
+            lime-tidyup-fixture-planning-scene:${EXACT_HEAD_SHA} \
+            bash -lc '
+              set -eo pipefail
+              source /opt/ros/humble/setup.bash
+              source /project/lib_ws/install/setup.bash
+              source /root/turtlebot3_ws/install/setup.bash
+
+              xacro /project/resource/turtlebot3_lime.urdf.xacro use_sim:=true \
+                > /artifacts/turtlebot3_lime_candidate_fixture_planning_scene.urdf
+              moveit_share="$(ros2 pkg prefix --share turtlebot3_lime_moveit_config)"
+              cp "${moveit_share}/config/turtlebot3_lime.srdf" \
+                /artifacts/turtlebot3_lime.srdf
+
+              python3 /root/bin/prepare_rubiks_candidate_fixture_planning_scene.py \
+                --accepted-artifact-zip /artifacts/rubiks-pregrasp-supported-fixture-evidence.zip \
+                --urdf /artifacts/turtlebot3_lime_candidate_fixture_planning_scene.urdf \
+                --states-tsv /artifacts/rubiks_candidate_fixture_states.tsv \
+                --objects-tsv /artifacts/rubiks_candidate_fixture_objects.tsv \
+                --output /artifacts/rubiks_candidate_fixture_prepared.json \
+                --source-ref "${SOURCE_REF}"
+
+              colcon build \
+                --merge-install \
+                --base-paths /project/rubiks_self_collision_ws/src \
+                --build-base /tmp/rubiks_fixture_collision_build \
+                --install-base /tmp/rubiks_fixture_collision_install \
+                --cmake-args -DCMAKE_BUILD_TYPE=Release \
+                --event-handlers console_direct+
+              source /tmp/rubiks_fixture_collision_install/setup.bash
+
+              /tmp/rubiks_fixture_collision_install/lib/rubiks_self_collision_preflight/rubiks_fixture_collision_preflight \
+                /artifacts/turtlebot3_lime_candidate_fixture_planning_scene.urdf \
+                /artifacts/turtlebot3_lime.srdf \
+                /artifacts/rubiks_candidate_fixture_objects.tsv \
+                /artifacts/rubiks_candidate_fixture_states.tsv \
+                /artifacts/rubiks_candidate_fixture_collision_results.tsv
+            ' >artifacts/candidate_fixture_planning_scene.stdout.log \
+              2>artifacts/candidate_fixture_planning_scene.stderr.log
+
+      - name: Summarize exact-head planning-scene evidence
+        run: |
+          python3 bin/summarize_rubiks_candidate_fixture_planning_scene.py \
+            --prepared-summary artifacts/rubiks_candidate_fixture_prepared.json \
+            --checker-results artifacts/rubiks_candidate_fixture_collision_results.tsv \
+            --accepted-artifact-zip artifacts/rubiks-pregrasp-supported-fixture-evidence.zip \
+            --states-tsv artifacts/rubiks_candidate_fixture_states.tsv \
+            --objects-tsv artifacts/rubiks_candidate_fixture_objects.tsv \
+            --urdf artifacts/turtlebot3_lime_candidate_fixture_planning_scene.urdf \
+            --srdf artifacts/turtlebot3_lime.srdf \
+            --output artifacts/rubiks_candidate_fixture_planning_scene_summary.json \
+            --manifest artifacts/rubiks_candidate_fixture_planning_scene_evidence.manifest.json \
+            --source-ref "${EXACT_HEAD_SHA}"
+
+      - name: Validate collision matrix and safety boundary
+        run: |
+          test -s artifacts/rubiks_candidate_fixture_planning_scene_summary.json
+          test -s artifacts/rubiks_candidate_fixture_planning_scene_evidence.manifest.json
+          python3 - <<'PY'
+          import json
+          import math
+          import os
+          from pathlib import Path
+
+          expected_head = os.environ['EXACT_HEAD_SHA']
+          summary = json.loads(Path('artifacts/rubiks_candidate_fixture_planning_scene_summary.json').read_text())
+          manifest = json.loads(Path('artifacts/rubiks_candidate_fixture_planning_scene_evidence.manifest.json').read_text())
+          if summary.get('passed') is not True:
+              raise SystemExit(summary.get('errors'))
+          if summary.get('source_ref') != expected_head:
+              raise SystemExit('summary is not exact-head bound')
+          if manifest.get('source_ref') != expected_head or manifest.get('exact_head_bound') is not True:
+              raise SystemExit('manifest is not exact-head bound')
+          if summary.get('decision') != 'CANDIDATE_FIXTURE_ENVIRONMENT_COLLISION_CLEAR':
+              raise SystemExit('unexpected planning-scene decision')
+
+          scene = summary.get('planning_scene', {})
+          if scene.get('robot_name') != 'turtlebot3_lime':
+              raise SystemExit('production robot model was not used')
+          if scene.get('object_count') != 2:
+              raise SystemExit('exact support/cube object count mismatch')
+          if scene.get('robot_object_acm_exemptions_added') is not False:
+              raise SystemExit('robot-object ACM exemption was added')
+          objects = {item['id']: item for item in scene.get('objects', [])}
+          if set(objects) != {'rubiks_support', 'rubiks_cube'}:
+              raise SystemExit('planning-scene object IDs mismatch')
+          if objects['rubiks_support']['dimensions_m'] != [0.075, 0.04, 0.01]:
+              raise SystemExit('support dimensions mismatch')
+          if objects['rubiks_cube']['dimensions_m'] != [0.057, 0.057, 0.057]:
+              raise SystemExit('cube dimensions mismatch')
+          if objects['rubiks_support']['relative_translation_m'] != [-0.019, 0.0, 0.0857]:
+              raise SystemExit('support relative transform mismatch')
+          if objects['rubiks_cube']['relative_translation_m'] != [-0.019, 0.0, 0.1192]:
+              raise SystemExit('cube relative transform mismatch')
+
+          matrix = summary.get('collision_matrix', {})
+          if matrix.get('state_count') != 601:
+              raise SystemExit('collision matrix size mismatch')
+          if matrix.get('candidate_state_count') != 1 or matrix.get('correction_case_count') != 6:
+              raise SystemExit('candidate/correction coverage mismatch')
+          if matrix.get('interpolation_samples_per_case') != 100:
+              raise SystemExit('interpolation coverage mismatch')
+          for key in (
+              'all_arm_bounds_ok', 'all_gripper_bounds_ok',
+              'all_self_collision_free', 'all_robot_world_collision_free',
+          ):
+              if matrix.get(key) is not True:
+                  raise SystemExit(f'{key} must be true')
+          if matrix.get('maximum_self_contact_pair_count') != 0 or matrix.get('maximum_world_contact_pair_count') != 0:
+              raise SystemExit('collision contact pair was reported')
+
+          envelope = summary.get('verified_envelope', {})
+          if not math.isclose(float(envelope.get('lateral_m')), 0.0005, abs_tol=1e-12):
+              raise SystemExit('verified lateral envelope mismatch')
+          if not math.isclose(float(envelope.get('yaw_rad')), math.radians(1), abs_tol=1e-12):
+              raise SystemExit('verified yaw envelope mismatch')
+          if envelope.get('mixed_case_checked') is not True or envelope.get('supported_fixture_fixed_world_objects') is not True:
+              raise SystemExit('mixed/fixed-world evidence is missing')
+          if envelope.get('gripper_open_and_fixed') is not True:
+              raise SystemExit('open fixed gripper evidence is missing')
+          if summary.get('next_required_phase') != 'RUBIK-SUPPORTED-CORRECTION-SIMULATION-TRIAL':
+              raise SystemExit('unexpected next phase')
+
+          safety = summary.get('safety', {})
+          if safety.get('offline_moveit_core_only') is not True:
+              raise SystemExit('planning-scene evidence must remain offline-only')
+          for key in (
+              'artifact_values_copied_by_hand', 'robot_object_acm_exemption_added',
+              'ros_node_created', 'controller_loaded', 'planning_request_created',
+              'trajectory_instantiated', 'command_sent', 'physical_hardware_used',
+              'physical_hardware_ready_claimed', 'lift_command_sent',
+              'support_removed', 'ifra_attachment_used', 'grasp_success_claimed',
+              'actuation_authorized', 'production_runtime_modified',
+          ):
+              if safety.get(key) is not False:
+                  raise SystemExit(f'{key} must remain false')
+          print(json.dumps(summary, indent=2, sort_keys=True))
+          PY
+
+      - name: Upload planning-scene evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-candidate-fixture-planning-scene-evidence
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
