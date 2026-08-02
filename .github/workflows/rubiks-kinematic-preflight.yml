@@ -1,13 +1,6 @@
 name: Rubik command-free kinematic preflight
 
 on:
-  push:
-    paths:
-      - "bin/rubiks_kinematic_preflight.py"
-      - "doc/rubiks_kinematic_preflight.md"
-      - "project/resource/turtlebot3_lime_gripper_test.urdf.xacro"
-      - "Dockerfile"
-      - ".github/workflows/rubiks-kinematic-preflight.yml"
   pull_request:
     paths:
       - "bin/rubiks_kinematic_preflight.py"
@@ -21,18 +14,23 @@ permissions:
   contents: read
 
 concurrency:
-  group: rubiks-kinematic-preflight-${{ github.workflow }}-${{ github.ref }}
+  group: rubiks-kinematic-preflight-${{ github.event.pull_request.head.ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
   command-free-kinematic-preflight:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXACT_HEAD_SHA }}
 
-      - name: Validate command-free preflight harness
+      - name: Validate exact checkout and command-free harness
         run: |
+          test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
           python3 -m py_compile bin/rubiks_kinematic_preflight.py
           python3 - <<'PY'
           from pathlib import Path
@@ -47,6 +45,7 @@ jobs:
                   raise SystemExit(f'preflight contains a command path: {token}')
           for token in (
               'damped_least_squares_geometric_jacobian',
+              'intersection_of_urdf_and_ros2_control_position_command_limits',
               'collision_verified_lateral_m', 'deterministic_no_op',
               'actuation_authorized', 'arm_command_sent',
               'gripper_command_sent',
@@ -55,16 +54,16 @@ jobs:
                   raise SystemExit(f'preflight lacks required evidence field: {token}')
           PY
 
-      - name: Build current Lime image
-        run: docker build -t lime-tidyup-kinematic-preflight:${{ github.sha }} .
+      - name: Build exact-head Lime image
+        run: docker build -t lime-tidyup-kinematic-preflight:${EXACT_HEAD_SHA} .
 
       - name: Resolve exact model and run offline preflight
         run: |
           mkdir -p artifacts
           docker run --rm \
-            -e SOURCE_REF="${{ github.sha }}" \
+            -e SOURCE_REF="${EXACT_HEAD_SHA}" \
             -v "$PWD/artifacts:/artifacts" \
-            lime-tidyup-kinematic-preflight:${{ github.sha }} \
+            lime-tidyup-kinematic-preflight:${EXACT_HEAD_SHA} \
             bash -lc '
               set -eo pipefail
               source /opt/ros/humble/setup.bash
@@ -89,23 +88,41 @@ jobs:
           test -s artifacts/rubiks_kinematic_preflight_evidence.manifest.json
           python3 - <<'PY'
           import json
+          import math
+          import os
           from pathlib import Path
+
+          expected_head = os.environ['EXACT_HEAD_SHA']
           summary = json.loads(Path('artifacts/rubiks_kinematic_preflight_summary.json').read_text())
           manifest = json.loads(Path('artifacts/rubiks_kinematic_preflight_evidence.manifest.json').read_text())
           if summary.get('passed') is not True:
               raise SystemExit(summary.get('errors'))
-          if summary.get('source_ref') != '${{ github.sha }}':
-              raise SystemExit('summary is not bound to exact workflow head')
-          if manifest.get('source_ref') != '${{ github.sha }}' or manifest.get('exact_head_bound') is not True:
-              raise SystemExit('manifest is not bound to exact workflow head')
+          if summary.get('source_ref') != expected_head:
+              raise SystemExit('summary is not bound to exact PR head')
+          if manifest.get('source_ref') != expected_head or manifest.get('exact_head_bound') is not True:
+              raise SystemExit('manifest is not bound to exact PR head')
+
           chain = summary.get('arm_chain', {})
-          if chain.get('joint_count') != 6 or len(chain.get('joint_order', [])) != 6:
-              raise SystemExit('resolved arm chain must contain six joints')
+          if chain.get('joint_count') != 6 or chain.get('joint_order') != [f'joint{i}' for i in range(1, 7)]:
+              raise SystemExit('resolved arm chain must contain joint1 through joint6 in order')
+          if chain.get('limit_policy') != 'intersection_of_urdf_and_ros2_control_position_command_limits':
+              raise SystemExit('effective joint-limit policy is missing')
+          for joint in chain.get('joints', []):
+              expected_lower = max(joint['urdf_lower'], joint['control_lower'])
+              expected_upper = min(joint['urdf_upper'], joint['control_upper'])
+              if not math.isclose(joint['effective_lower'], expected_lower, rel_tol=0.0, abs_tol=1e-12):
+                  raise SystemExit(f"{joint['name']} effective lower limit mismatch")
+              if not math.isclose(joint['effective_upper'], expected_upper, rel_tol=0.0, abs_tol=1e-12):
+                  raise SystemExit(f"{joint['name']} effective upper limit mismatch")
+
           controller = summary.get('controller', {})
           if controller.get('joint_order_exact') is not True:
               raise SystemExit('controller order must exactly match the URDF chain')
           if controller.get('action_type') != 'control_msgs/action/FollowJointTrajectory':
               raise SystemExit('unexpected action schema')
+          if controller.get('interface_name') != 'position' or controller.get('command_interfaces') != ['position']:
+              raise SystemExit('unexpected trajectory-controller command interface')
+
           cases = summary.get('accepted_observation_cases', [])
           if len(cases) != 6 or any(case.get('numerically_feasible') is not True for case in cases):
               raise SystemExit('all accepted observation cases must pass numerical preflight')
@@ -114,6 +131,7 @@ jobs:
           bounds = summary.get('bounds', {})
           if bounds.get('collision_verified_lateral_m') != 0.0 or bounds.get('collision_verified_yaw_rad') != 0.0:
               raise SystemExit('collision-verified actuation bounds must remain zero')
+
           safety = summary.get('safety', {})
           for key in (
               'production_pose_estimator_claimed', 'controller_loaded',
