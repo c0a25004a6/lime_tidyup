@@ -75,6 +75,7 @@ std::vector<PreviewState> read_states(const std::string& path, std::size_t expec
     throw std::runtime_error("cannot open " + path);
   }
   std::vector<PreviewState> states;
+  std::set<std::string> labels;
   std::string line;
   while (std::getline(stream, line))
   {
@@ -89,6 +90,10 @@ std::vector<PreviewState> read_states(const std::string& path, std::size_t expec
     }
     PreviewState state;
     state.label = fields.front();
+    if (state.label.empty() || !labels.insert(state.label).second)
+    {
+      throw std::runtime_error("empty or duplicate state label: " + state.label);
+    }
     for (std::size_t index = 1; index < fields.size(); ++index)
     {
       std::size_t consumed = 0;
@@ -100,6 +105,10 @@ std::vector<PreviewState> read_states(const std::string& path, std::size_t expec
       state.positions.push_back(value);
     }
     states.push_back(std::move(state));
+  }
+  if (states.empty())
+  {
+    throw std::runtime_error("state matrix is empty");
   }
   return states;
 }
@@ -162,10 +171,6 @@ int main(int argc, char** argv)
       adjacent_entry_present && adjacent_type != collision_detection::AllowedCollision::NEVER;
 
     const auto states = read_states(argv[3], expected_joints.size());
-    if (states.size() != 7)
-    {
-      throw std::runtime_error("expected seed plus six preview states");
-    }
 
     std::ofstream output(argv[4]);
     if (!output)
@@ -174,7 +179,7 @@ int main(int argc, char** argv)
     }
     output << "META\t" << robot_model->getName() << "\tarm\t" << join(active_joints, ",") << "\t"
            << join(missing_geometry, ",") << "\t" << (adjacent_entry_present ? "true" : "false") << "\t"
-           << (adjacent_allowed ? "true" : "false") << "\n";
+           << (adjacent_allowed ? "true" : "false") << "\t" << states.size() << "\n";
 
     collision_detection::CollisionRequest request;
     request.group_name = "arm";
