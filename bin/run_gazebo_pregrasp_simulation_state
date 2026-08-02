@@ -1,0 +1,209 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+ARTIFACT_DIR="${1:-/artifacts}"
+SOURCE_REF="${2:-unknown}"
+mkdir -p "${ARTIFACT_DIR}"
+
+source /opt/ros/humble/setup.bash
+source /project/lib_ws/install/setup.bash
+source /root/turtlebot3_ws/install/setup.bash
+set -u
+
+MODEL_NAME="turtlebot3_lime_arm_motion_test"
+MOTION_URDF="${ARTIFACT_DIR}/turtlebot3_lime_arm_motion_test.urdf"
+PRODUCTION_URDF="${ARTIFACT_DIR}/turtlebot3_lime_pregrasp_search.urdf"
+CANDIDATE_JSON="${ARTIFACT_DIR}/rubiks_pregrasp_alignment_search.json"
+CANDIDATE_STATES="${ARTIFACT_DIR}/rubiks_pregrasp_alignment_states.tsv"
+SUMMARY="${ARTIFACT_DIR}/rubiks_pregrasp_simulation_state_summary.json"
+SERVER_LOG="${ARTIFACT_DIR}/rubiks_pregrasp_simulation_state.gzserver.log"
+RSP_LOG="${ARTIFACT_DIR}/rubiks_pregrasp_simulation_state.robot_state_publisher.log"
+
+cleanup() {
+  status=$?
+  for pid in "${GZSERVER_PID:-}" "${RSP_PID:-}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+      kill -INT "${pid}" 2>/dev/null || true
+    fi
+  done
+  sleep 2
+  for pid in "${GZSERVER_PID:-}" "${RSP_PID:-}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+      kill -TERM "${pid}" 2>/dev/null || true
+      wait "${pid}" 2>/dev/null || true
+    fi
+  done
+  exit "${status}"
+}
+trap cleanup EXIT INT TERM
+
+ros2_service_available() {
+  local service_type
+  service_type="$(timeout 5 ros2 service type "$1" 2>/dev/null)" || return 1
+  [[ -n "${service_type}" ]]
+}
+
+ros2_action_available() {
+  local output padded
+  output="$(timeout 5 ros2 action list 2>/dev/null)" || return 1
+  padded=$'\n'"${output}"$'\n'
+  [[ "${padded}" == *$'\n'"$1"$'\n'* ]]
+}
+
+validate_world_properties() {
+  local source_file="$1"
+  local output_file="$2"
+  python3 - "${source_file}" "${output_file}" "${MODEL_NAME}" <<'PY'
+from __future__ import annotations
+import ast
+import json
+import re
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+match = re.search(r"model_names=\[(.*?)\]", source, flags=re.S)
+if match is None:
+    raise SystemExit("model_names missing from GetWorldProperties response")
+models = ast.literal_eval("[" + match.group(1) + "]")
+expected = {"ground_plane", sys.argv[3]}
+if set(models) != expected:
+    raise SystemExit(f"unexpected world models: {models}; expected {sorted(expected)}")
+for forbidden in ("cube", "support", "fixture", "rubiks_dynamic", "ifra"):
+    if any(forbidden in name.lower() for name in models):
+        raise SystemExit(f"forbidden fixture model present: {models}")
+Path(sys.argv[2]).write_text(json.dumps({"models": models, "expected_models": sorted(expected)}, indent=2, sort_keys=True) + "\n")
+PY
+}
+
+xacro /project/resource/turtlebot3_lime.urdf.xacro use_sim:=true >"${PRODUCTION_URDF}"
+bringup_share="$(ros2 pkg prefix --share turtlebot3_lime_bringup)"
+cp "${bringup_share}/config/gazebo_controller_manager.yaml" \
+  "${ARTIFACT_DIR}/gazebo_controller_manager.production.yaml"
+python3 /root/bin/find_rubiks_pregrasp_alignment.py \
+  --urdf "${PRODUCTION_URDF}" \
+  --controller-yaml "${ARTIFACT_DIR}/gazebo_controller_manager.production.yaml" \
+  --output "${CANDIDATE_JSON}" \
+  --states-tsv "${CANDIDATE_STATES}" \
+  --source-ref "${SOURCE_REF}"
+
+xacro /project/resource/turtlebot3_lime_arm_motion_test.urdf.xacro >"${MOTION_URDF}"
+grep -q 'libgazebo_ros2_control.so' "${MOTION_URDF}"
+for forbidden in \
+  libgazebo_grasp_fix.so librealsense_gazebo_plugin.so libgazebo_ros_diff_drive.so \
+  libgazebo_ros_ray_sensor.so IFRA_LinkAttacher gazebo_grasp_fix; do
+  if grep -q "${forbidden}" "${MOTION_URDF}"; then
+    echo "forbidden plugin present in arm-motion URDF: ${forbidden}" >&2
+    exit 2
+  fi
+done
+if grep -q 'gripper_controller' /project/resource/gazebo_arm_motion_test_controller_manager.yaml; then
+  echo "gripper controller must not be configured" >&2
+  exit 2
+fi
+if grep -Eq 'diff_drive|wheel_controller|base_controller' /project/resource/gazebo_arm_motion_test_controller_manager.yaml; then
+  echo "base controller must not be configured" >&2
+  exit 2
+fi
+
+ros2 run robot_state_publisher robot_state_publisher "${MOTION_URDF}" \
+  --ros-args -p use_sim_time:=true >"${RSP_LOG}" 2>&1 &
+RSP_PID=$!
+sleep 2
+kill -0 "${RSP_PID}" 2>/dev/null || { cat "${RSP_LOG}"; exit 3; }
+
+gzserver /project/resource/rubiks_grasp_calibration.world \
+  -s libgazebo_ros_init.so -s libgazebo_ros_factory.so \
+  >"${SERVER_LOG}" 2>&1 &
+GZSERVER_PID=$!
+
+for _ in $(seq 1 90); do
+  if ros2_service_available '/spawn_entity'; then break; fi
+  kill -0 "${GZSERVER_PID}" 2>/dev/null || { cat "${SERVER_LOG}"; exit 4; }
+  sleep 1
+done
+ros2_service_available '/spawn_entity' || { cat "${SERVER_LOG}"; exit 4; }
+
+ros2 run gazebo_ros spawn_entity.py \
+  -entity "${MODEL_NAME}" -file "${MOTION_URDF}" \
+  -x 0.0 -y 0.0 -z 0.03 -Y 0.0 \
+  >"${ARTIFACT_DIR}/rubiks_pregrasp_simulation_state.robot_spawn.log" 2>&1
+
+for _ in $(seq 1 90); do
+  if ros2_service_available '/controller_manager/list_controllers'; then break; fi
+  kill -0 "${GZSERVER_PID}" 2>/dev/null || { cat "${SERVER_LOG}"; exit 5; }
+  sleep 1
+done
+ros2_service_available '/controller_manager/list_controllers' || { cat "${SERVER_LOG}"; exit 5; }
+
+ros2 run controller_manager spawner joint_state_broadcaster \
+  --controller-manager /controller_manager \
+  >"${ARTIFACT_DIR}/pregrasp_joint_state_broadcaster.spawner.log" 2>&1
+ros2 run controller_manager spawner arm_controller \
+  --controller-manager /controller_manager \
+  >"${ARTIFACT_DIR}/pregrasp_arm_controller.spawner.log" 2>&1
+
+for _ in $(seq 1 60); do
+  if ros2_action_available '/arm_controller/follow_joint_trajectory'; then break; fi
+  sleep 1
+done
+ros2_action_available '/arm_controller/follow_joint_trajectory' || exit 6
+if ros2_action_available '/gripper_controller/gripper_cmd'; then
+  echo "gripper action unexpectedly available" >&2
+  exit 6
+fi
+
+ros2 control list_controllers >"${ARTIFACT_DIR}/pregrasp_controllers_before.txt"
+grep -q '^arm_controller.*active' "${ARTIFACT_DIR}/pregrasp_controllers_before.txt"
+grep -q '^joint_state_broadcaster.*active' "${ARTIFACT_DIR}/pregrasp_controllers_before.txt"
+if grep -Eq 'gripper|wheel|diff_drive|base_controller' "${ARTIFACT_DIR}/pregrasp_controllers_before.txt"; then
+  echo "forbidden controller loaded" >&2
+  cat "${ARTIFACT_DIR}/pregrasp_controllers_before.txt" >&2
+  exit 6
+fi
+
+for _ in $(seq 1 30); do
+  if ros2_service_available '/get_world_properties'; then break; fi
+  sleep 1
+done
+ros2_service_available '/get_world_properties' || exit 7
+ros2 service call /get_world_properties gazebo_msgs/srv/GetWorldProperties '{}' \
+  >"${ARTIFACT_DIR}/pregrasp_world_properties_before.txt" 2>&1
+validate_world_properties \
+  "${ARTIFACT_DIR}/pregrasp_world_properties_before.txt" \
+  "${ARTIFACT_DIR}/pregrasp_world_models_before.json"
+
+set +e
+python3 /root/bin/run_rubiks_pregrasp_simulation_state.py \
+  --candidate-json "${CANDIDATE_JSON}" \
+  --output "${SUMMARY}" \
+  --source-ref "${SOURCE_REF}" \
+  --trajectory-seconds 3.0 \
+  --hold-seconds 2.0 \
+  >"${ARTIFACT_DIR}/pregrasp_simulation_state.stdout.json" \
+  2>"${ARTIFACT_DIR}/pregrasp_simulation_state.stderr.log"
+TRIAL_STATUS=$?
+set -e
+
+ros2 control list_controllers >"${ARTIFACT_DIR}/pregrasp_controllers_after.txt" || true
+ros2 action list >"${ARTIFACT_DIR}/pregrasp_actions_after.txt" 2>&1 || true
+ros2 service call /get_world_properties gazebo_msgs/srv/GetWorldProperties '{}' \
+  >"${ARTIFACT_DIR}/pregrasp_world_properties_after.txt" 2>&1 || true
+validate_world_properties \
+  "${ARTIFACT_DIR}/pregrasp_world_properties_after.txt" \
+  "${ARTIFACT_DIR}/pregrasp_world_models_after.json"
+
+if grep -Eq 'gripper|wheel|diff_drive|base_controller' "${ARTIFACT_DIR}/pregrasp_controllers_after.txt"; then
+  echo "forbidden controller appeared after trial" >&2
+  exit 8
+fi
+if grep -q '/gripper_controller/gripper_cmd' "${ARTIFACT_DIR}/pregrasp_actions_after.txt"; then
+  echo "gripper action appeared after trial" >&2
+  exit 8
+fi
+
+if [[ ! -s "${SUMMARY}" ]]; then
+  echo "simulation telemetry summary missing" >&2
+  exit 9
+fi
+exit "${TRIAL_STATUS}"
