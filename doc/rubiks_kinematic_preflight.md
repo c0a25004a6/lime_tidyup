@@ -18,16 +18,20 @@ The evidence harness builds the current Lime Docker image and resolves the insta
 
 1. expands the test-only Lime Xacro, which retains the upstream manipulator and `ros2_control` definitions;
 2. walks the rendered URDF chain from `link1` to `link7` instead of hard-coding arm joint names;
-3. records joint ordering, axes, origins, position/velocity/effort limits, and ROS 2 command/state interfaces;
-4. copies and parses the installed production `gazebo_controller_manager.yaml`;
-5. requires one `JointTrajectoryController` whose joint set matches the resolved arm chain;
-6. records the expected `control_msgs/action/FollowJointTrajectory` endpoint as schema evidence only.
+3. records joint ordering, axes, origins, URDF position/velocity/effort limits, and ROS 2 command/state interfaces;
+4. records the position-command minimum and maximum embedded in each rendered `ros2_control` joint;
+5. uses the intersection of URDF and `ros2_control` position-command limits as the effective numerical limit;
+6. copies and parses the installed production `gazebo_controller_manager.yaml`;
+7. requires one `JointTrajectoryController` whose joint order exactly matches the resolved arm chain;
+8. records the expected `control_msgs/action/FollowJointTrajectory` endpoint as schema evidence only.
+
+The upstream definitions do not use identical position ranges for every arm joint. Treating the URDF range alone as authoritative can produce a preview that the hardware/control interface would reject. The preflight therefore fails when either source is missing or their intersection cannot preserve the required one-degree margin.
 
 No controller is spawned and no action client is created.
 
 ## Offline Jacobian method
 
-The preflight implements a dependency-light geometric Jacobian directly from the rendered URDF. A deterministic seed is selected from bounded deterministic candidates. Seeds are rejected when they violate a one-degree joint-limit margin or produce a non-finite or ill-conditioned Jacobian.
+The preflight implements a dependency-light geometric Jacobian directly from the rendered URDF. A deterministic seed is selected from bounded deterministic candidates. Seeds are rejected when they violate a one-degree effective joint-limit margin or produce a non-finite or ill-conditioned Jacobian.
 
 Accepted observation cases from PR #9 are converted into a local `link7` twist and evaluated with damped least squares:
 
@@ -38,7 +42,7 @@ dq = J^T (J J^T + lambda^2 I)^-1 dx
 Recorded checks include:
 
 - finite joint deltas;
-- position limits with margin;
+- effective position limits with margin;
 - maximum per-joint preview step;
 - nonlinear forward-kinematics residual;
 - unwanted translation;
@@ -70,9 +74,11 @@ The preflight rejects on:
 - a non-six-DOF `link1` to `link7` chain;
 - controller joint-order mismatch;
 - missing position command/state interfaces;
+- missing `ros2_control` position-command minimum or maximum;
+- unusable URDF/control-limit intersection;
 - non-finite input or output;
 - singularity or condition-number limit;
-- joint-limit margin violation;
+- effective joint-limit margin violation;
 - excessive preview joint step;
 - residual outside tolerance;
 - unknown collision state;
