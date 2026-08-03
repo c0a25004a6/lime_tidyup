@@ -30,7 +30,7 @@ def parse_results(path: Path) -> dict[str, Any]:
             continue
         fields = raw.split("\t")
         if fields[0] == "META":
-            require(len(fields) == 10, "invalid META row")
+            require(len(fields) == 11, "invalid META row")
             meta = {
                 "robot_name": fields[1],
                 "root_link": fields[2],
@@ -41,23 +41,26 @@ def parse_results(path: Path) -> dict[str, Any]:
                 "srdf_disabled_pair_count": int(fields[7]),
                 "allowed_non_audited_link_count": int(fields[8]),
                 "maximum_allowed_model_mimic_residual_m": float(fields[9]),
+                "maximum_allowed_measured_projection_residual_m": float(fields[10]),
             }
         elif fields[0] == "STATE":
-            require(len(fields) == 14, "invalid STATE row")
+            require(len(fields) == 16, "invalid STATE row")
             rows.append({
                 "label": fields[1],
                 "bounds_ok": fields[2] == "true",
                 "model_mimic_match": fields[3] == "true",
                 "model_mimic_residual_m": float(fields[4]),
-                "left_m": float(fields[5]),
-                "right_m": float(fields[6]),
-                "modeled_right_m": float(fields[7]),
-                "self_collision": fields[8] == "true",
-                "floor_collision": fields[9] == "true",
-                "floor_pair_count": int(fields[10]),
-                "floor_pairs": fields[11].split(",") if fields[11] else [],
-                "self_pair_count": int(fields[12]),
-                "self_pairs": fields[13].split(",") if fields[13] else [],
+                "measured_projection_match": fields[5] == "true",
+                "measured_projection_residual_m": float(fields[6]),
+                "left_m": float(fields[7]),
+                "right_m": float(fields[8]),
+                "modeled_right_m": float(fields[9]),
+                "self_collision": fields[10] == "true",
+                "floor_collision": fields[11] == "true",
+                "floor_pair_count": int(fields[12]),
+                "floor_pairs": fields[13].split(",") if fields[13] else [],
+                "self_pair_count": int(fields[14]),
+                "self_pairs": fields[15].split(",") if fields[15] else [],
             })
         else:
             raise ValueError("unknown result row")
@@ -67,13 +70,29 @@ def parse_results(path: Path) -> dict[str, Any]:
         "state_count": len(rows),
         "all_bounds_ok": all(row["bounds_ok"] for row in rows),
         "all_model_mimic_matches": all(row["model_mimic_match"] for row in rows),
-        "maximum_model_mimic_residual_m": max(row["model_mimic_residual_m"] for row in rows),
+        "maximum_model_mimic_residual_m": max(
+            row["model_mimic_residual_m"] for row in rows
+        ),
+        "all_measured_projection_matches": all(
+            row["measured_projection_match"] for row in rows
+        ),
+        "maximum_measured_projection_residual_m": max(
+            row["measured_projection_residual_m"] for row in rows
+        ),
         "all_self_collision_free": all(not row["self_collision"] for row in rows),
-        "all_audited_links_floor_clear": all(not row["floor_collision"] for row in rows),
-        "maximum_floor_pair_count": max(row["floor_pair_count"] for row in rows),
+        "all_audited_links_floor_clear": all(
+            not row["floor_collision"] for row in rows
+        ),
+        "maximum_floor_pair_count": max(
+            row["floor_pair_count"] for row in rows
+        ),
         "maximum_self_pair_count": max(row["self_pair_count"] for row in rows),
-        "floor_pairs": sorted({pair for row in rows for pair in row["floor_pairs"]}),
-        "self_pairs": sorted({pair for row in rows for pair in row["self_pairs"]}),
+        "floor_pairs": sorted(
+            {pair for row in rows for pair in row["floor_pairs"]}
+        ),
+        "self_pairs": sorted(
+            {pair for row in rows for pair in row["self_pairs"]}
+        ),
         "left_min_m": min(row["left_m"] for row in rows),
         "left_max_m": max(row["left_m"] for row in rows),
         "right_min_m": min(row["right_m"] for row in rows),
@@ -101,11 +120,24 @@ def main() -> int:
     parser.add_argument("--source-ref", required=True)
     args = parser.parse_args()
 
-    paths = {name: Path(getattr(args, name)) for name in (
-        "simulation_summary", "ground_summary", "ground_manifest", "state_trace",
-        "state_binding", "states_tsv", "collision_results", "simulation_urdf",
-        "moveit_urdf", "srdf", "world", "controllers_before", "controllers_after",
-    )}
+    paths = {
+        name: Path(getattr(args, name))
+        for name in (
+            "simulation_summary",
+            "ground_summary",
+            "ground_manifest",
+            "state_trace",
+            "state_binding",
+            "states_tsv",
+            "collision_results",
+            "simulation_urdf",
+            "moveit_urdf",
+            "srdf",
+            "world",
+            "controllers_before",
+            "controllers_after",
+        )
+    }
     simulation = json.loads(paths["simulation_summary"].read_text())
     ground = json.loads(paths["ground_summary"].read_text())
     ground_manifest = json.loads(paths["ground_manifest"].read_text())
@@ -113,46 +145,104 @@ def main() -> int:
     binding = json.loads(paths["state_binding"].read_text())
     result = parse_results(paths["collision_results"])
 
-    for label, evidence in (("simulation", simulation), ("ground", ground),
-                            ("ground_manifest", ground_manifest), ("trace", trace),
-                            ("binding", binding)):
-        require(evidence.get("source_ref") == args.source_ref, f"{label} source mismatch")
+    for label, evidence in (
+        ("simulation", simulation),
+        ("ground", ground),
+        ("ground_manifest", ground_manifest),
+        ("trace", trace),
+        ("binding", binding),
+    ):
+        require(
+            evidence.get("source_ref") == args.source_ref,
+            f"{label} source mismatch",
+        )
     require(simulation.get("passed") is True, "simulation failed")
     require(ground.get("passed") is True, "upstream floor audit failed")
-    require(ground_manifest.get("all_states_passed") is True, "upstream manifest failed")
-    require(trace.get("passed") is True and trace.get("errors") == [], "passive state trace failed")
-    require(binding.get("passed") is True and binding.get("errors") == [], "passive state binding failed")
+    require(
+        ground_manifest.get("all_states_passed") is True,
+        "upstream manifest failed",
+    )
+    require(
+        trace.get("passed") is True and trace.get("errors") == [],
+        "passive state trace failed",
+    )
+    require(
+        binding.get("passed") is True and binding.get("errors") == [],
+        "passive state binding failed",
+    )
 
     for label in ("controllers_before", "controllers_after"):
         text = paths[label].read_text()
-        require("arm_controller" in text and "active" in text, f"arm controller missing in {label}")
-        require("joint_state_broadcaster" in text and "active" in text, f"state broadcaster missing in {label}")
-        require("gripper_controller" not in text, f"finger actuator appeared in {label}")
-        require(not any(token in text for token in ("wheel", "diff_drive", "base_controller")), f"base actuator appeared in {label}")
+        require(
+            "arm_controller" in text and "active" in text,
+            f"arm controller missing in {label}",
+        )
+        require(
+            "joint_state_broadcaster" in text and "active" in text,
+            f"state broadcaster missing in {label}",
+        )
+        require(
+            "gripper_controller" not in text,
+            f"finger actuator appeared in {label}",
+        )
+        require(
+            not any(
+                token in text for token in ("wheel", "diff_drive", "base_controller")
+            ),
+            f"base actuator appeared in {label}",
+        )
 
     errors = []
     checks = (
-        (result["state_count"] == int(binding.get("state_count", 0)), "state count mismatch"),
+        (
+            result["state_count"] == int(binding.get("state_count", 0)),
+            "state count mismatch",
+        ),
         (result["robot_name"] == "turtlebot3_lime", "robot name mismatch"),
         (result["root_link"] == "base_footprint", "root link mismatch"),
         (result["arm_joint_order"] == ARM, "arm order mismatch"),
-        (result["finger_joint_order"] == FINGER_JOINTS, "finger order mismatch"),
+        (
+            result["finger_joint_order"] == FINGER_JOINTS,
+            "finger order mismatch",
+        ),
         (result["audited_links"] == FINGER_LINKS, "audited link set mismatch"),
         (result["missing_geometry"] == [], "finger geometry missing"),
         (result["all_bounds_ok"], "bounds failure"),
-        (result["all_model_mimic_matches"], "model mimic mismatch"),
-        (result["maximum_model_mimic_residual_m"] <= result["maximum_allowed_model_mimic_residual_m"], "model mimic residual exceeded"),
-        (result["all_self_collision_free"] and result["self_pairs"] == [], "self collision detected"),
-        (result["all_audited_links_floor_clear"] and result["floor_pairs"] == [], "finger-floor collision detected"),
+        (result["all_model_mimic_matches"], "internal model mimic mismatch"),
+        (
+            result["maximum_model_mimic_residual_m"]
+            <= result["maximum_allowed_model_mimic_residual_m"],
+            "internal model mimic residual exceeded",
+        ),
+        (
+            result["all_measured_projection_matches"],
+            "measured-to-model projection mismatch",
+        ),
+        (
+            result["maximum_measured_projection_residual_m"]
+            <= result["maximum_allowed_measured_projection_residual_m"],
+            "measured-to-model projection residual exceeded",
+        ),
+        (
+            result["all_self_collision_free"] and result["self_pairs"] == [],
+            "self collision detected",
+        ),
+        (
+            result["all_audited_links_floor_clear"]
+            and result["floor_pairs"] == [],
+            "finger-floor collision detected",
+        ),
         (result["maximum_floor_pair_count"] == 0, "floor contacts reported"),
         (result["maximum_self_pair_count"] == 0, "self contacts reported"),
     )
     errors.extend(message for ok, message in checks if not ok)
 
     summary = {
-        "schema_version": 1,
+        "schema_version": 2,
         "phase": "RUBIK-PREGRASP-GRIPPER-STATE-AND-GROUND-CLEARANCE-EVIDENCE",
-        "writer_lease": "WL-RUBIK-PREGRASP-GRIPPER-STATE-GROUND-CLEARANCE-20260803-01",
+        "writer_lease": (
+            "WL-RUBIK-PREGRASP-GRIPPER-STATE-GROUND-CLEARANCE-20260803-01"
+        ),
         "source_ref": args.source_ref,
         "exact_head_bound": True,
         "passed": not errors,
@@ -161,12 +251,14 @@ def main() -> int:
         "passive_state_binding": binding,
         "moveit_passive_finger_floor_audit": result,
         "verified_claim": (
-            "measured_sampled_passive_finger_states_within_limits_mimic_consistent_self_collision_free_and_floor_clear"
-            if not errors else None
+            "measured_sampled_passive_finger_states_project_to_exact_mimic_model_within_declared_tolerance_and_are_self_collision_free_and_floor_clear"
+            if not errors
+            else None
         ),
         "claim_limits": {
             "sampled_states_only": True,
             "audited_links_only": FINGER_LINKS,
+            "measurement_projection_required": True,
             "continuous_between_samples_claimed": False,
             "object_clearance_claimed": False,
             "contact_or_force_claimed": False,
@@ -187,12 +279,14 @@ def main() -> int:
             "physical_hardware_used": False,
             "production_runtime_modified": False,
         },
-        "next_required_phase": "RUBIK-PREGRASP-FIXTURE-PLACEMENT-OFFLINE-COLLISION-PREFLIGHT",
+        "next_required_phase": (
+            "RUBIK-PREGRASP-FIXTURE-PLACEMENT-OFFLINE-COLLISION-PREFLIGHT"
+        ),
     }
     output = Path(args.output)
     output.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "phase": summary["phase"],
         "source_ref": args.source_ref,
         "exact_head_bound": True,
@@ -208,7 +302,9 @@ def main() -> int:
         "physical_hardware_used": False,
         "production_runtime_modified": False,
     }
-    Path(args.manifest).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    Path(args.manifest).write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    )
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0 if not errors else 1
 
