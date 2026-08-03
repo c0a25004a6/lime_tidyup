@@ -1,0 +1,219 @@
+name: Rubik pregrasp dynamic path audit
+
+on:
+  pull_request:
+    paths:
+      - "bin/audit_rubiks_pregrasp_dynamic_path.py"
+      - "bin/find_rubiks_pregrasp_alignment.py"
+      - "bin/capture_gazebo_model_states.py"
+      - "bin/run_rubiks_pregrasp_simulation_state.py"
+      - "bin/run_gazebo_pregrasp_simulation_state"
+      - "project/rubiks_self_collision_ws/**"
+      - "project/resource/turtlebot3_lime.urdf.xacro"
+      - "project/resource/turtlebot3_lime_arm_motion_test.urdf.xacro"
+      - "project/resource/gazebo_arm_motion_test_controller_manager.yaml"
+      - "project/resource/rubiks_grasp_calibration.world"
+      - "doc/rubiks_pregrasp_dynamic_path_audit.md"
+      - "Dockerfile"
+      - ".github/workflows/rubiks-pregrasp-dynamic-path-audit.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rubiks-pregrasp-dynamic-path-audit-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  exact-head-dynamic-path-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXACT_HEAD_SHA }}
+
+      - name: Validate exact checkout and unchanged command boundary
+        run: |
+          test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
+          python3 -m py_compile \
+            bin/audit_rubiks_pregrasp_dynamic_path.py \
+            bin/find_rubiks_pregrasp_alignment.py \
+            bin/capture_gazebo_model_states.py \
+            bin/run_rubiks_pregrasp_simulation_state.py
+          bash -n bin/run_gazebo_pregrasp_simulation_state
+          python3 - <<'PY'
+          from pathlib import Path
+
+          audit = Path('bin/audit_rubiks_pregrasp_dynamic_path.py').read_text(encoding='utf-8')
+          runner = Path('bin/run_gazebo_pregrasp_simulation_state').read_text(encoding='utf-8')
+          checker = Path('project/rubiks_self_collision_ws/src/rubiks_self_collision_preflight/src/rubiks_self_collision_preflight.cpp').read_text(encoding='utf-8')
+
+          for required in (
+              'PATH_MAX_ABS_RESIDUAL_RAD = 0.02',
+              'joint_state_samples',
+              'wall_time_monotonic',
+              'ros_stamp_monotonic',
+              'max_abs_path_residual_rad',
+              'max_effective_limit_violation_rad',
+              'all_self_collision_free',
+              'new_command_path_added',
+              'same_two_arm_goals_only',
+              'environment_clearance_claimed',
+          ):
+              if required not in audit:
+                  raise SystemExit(f'audit lacks required gate: {required}')
+          for required in (
+              '/arm_controller/follow_joint_trajectory',
+              'candidate_arm_goal_sent',
+              'return_to_zero_goal_sent',
+              '/gripper_controller/gripper_cmd',
+              'validate_world_properties',
+          ):
+              if required not in runner:
+                  raise SystemExit(f'runner lacks required existing boundary: {required}')
+          if runner.count('run_rubiks_pregrasp_simulation_state.py') != 1:
+              raise SystemExit('runner command path count changed')
+          for forbidden in ('cmd_vel', 'navigate_to_pose'):
+              if forbidden in runner or forbidden in audit:
+                  raise SystemExit(f'forbidden command path present: {forbidden}')
+          for required in ('checkSelfCollision', 'satisfiesBounds', 'max_contacts_per_pair'):
+              if required not in checker:
+                  raise SystemExit(f'MoveIt checker lacks required operation: {required}')
+          for forbidden in ('rclcpp::Node', 'ActionClient', 'create_publisher', 'MoveGroupInterface'):
+              if forbidden in checker:
+                  raise SystemExit(f'MoveIt checker contains a command/runtime path: {forbidden}')
+          PY
+
+      - name: Build exact-head Lime image
+        run: docker build -t lime-tidyup-pregrasp-dynamic-audit:${EXACT_HEAD_SHA} .
+
+      - name: Run unchanged two-goal trial and audit every actual state
+        run: |
+          mkdir -p artifacts
+          docker run --rm \
+            -e ROS_DOMAIN_ID=34 \
+            -e SOURCE_REF="${EXACT_HEAD_SHA}" \
+            -v "$PWD/artifacts:/artifacts" \
+            lime-tidyup-pregrasp-dynamic-audit:${EXACT_HEAD_SHA} \
+            bash -lc '
+              set -eo pipefail
+              source /opt/ros/humble/setup.bash
+              source /project/lib_ws/install/setup.bash
+              source /root/turtlebot3_ws/install/setup.bash
+
+              bash /root/bin/run_gazebo_pregrasp_simulation_state \
+                /artifacts "${SOURCE_REF}"
+
+              moveit_share="$(ros2 pkg prefix --share turtlebot3_lime_moveit_config)"
+              cp "${moveit_share}/config/turtlebot3_lime.srdf" \
+                /artifacts/turtlebot3_lime.srdf
+
+              python3 /root/bin/audit_rubiks_pregrasp_dynamic_path.py extract \
+                --simulation-summary /artifacts/rubiks_pregrasp_simulation_state_summary.json \
+                --states-tsv /artifacts/rubiks_pregrasp_dynamic_joint_states.tsv \
+                --metadata /artifacts/rubiks_pregrasp_dynamic_path_extraction.json \
+                --source-ref "${SOURCE_REF}"
+
+              colcon build \
+                --merge-install \
+                --base-paths /project/rubiks_self_collision_ws/src \
+                --build-base /tmp/rubiks_dynamic_path_collision_build \
+                --install-base /tmp/rubiks_dynamic_path_collision_install \
+                --cmake-args -DCMAKE_BUILD_TYPE=Release \
+                --event-handlers console_direct+
+              source /tmp/rubiks_dynamic_path_collision_install/setup.bash
+
+              /tmp/rubiks_dynamic_path_collision_install/lib/rubiks_self_collision_preflight/rubiks_self_collision_preflight \
+                /artifacts/turtlebot3_lime_pregrasp_search.urdf \
+                /artifacts/turtlebot3_lime.srdf \
+                /artifacts/rubiks_pregrasp_dynamic_joint_states.tsv \
+                /artifacts/rubiks_pregrasp_dynamic_collision_results.tsv
+
+              python3 /root/bin/audit_rubiks_pregrasp_dynamic_path.py summarize \
+                --simulation-summary /artifacts/rubiks_pregrasp_simulation_state_summary.json \
+                --extraction-metadata /artifacts/rubiks_pregrasp_dynamic_path_extraction.json \
+                --states-tsv /artifacts/rubiks_pregrasp_dynamic_joint_states.tsv \
+                --collision-results /artifacts/rubiks_pregrasp_dynamic_collision_results.tsv \
+                --urdf /artifacts/turtlebot3_lime_pregrasp_search.urdf \
+                --srdf /artifacts/turtlebot3_lime.srdf \
+                --controller-yaml /artifacts/gazebo_controller_manager.production.yaml \
+                --output /artifacts/rubiks_pregrasp_dynamic_path_audit_summary.json \
+                --manifest /artifacts/rubiks_pregrasp_dynamic_path_audit_evidence.manifest.json \
+                --source-ref "${SOURCE_REF}"
+            ' >artifacts/dynamic_path_audit.stdout.log \
+              2>artifacts/dynamic_path_audit.stderr.log
+
+      - name: Validate exact-head dynamic path evidence
+        run: |
+          test -s artifacts/rubiks_pregrasp_dynamic_path_audit_summary.json
+          test -s artifacts/rubiks_pregrasp_dynamic_path_audit_evidence.manifest.json
+          python3 - <<'PY'
+          import json
+          import math
+          import os
+          from pathlib import Path
+
+          root = Path('artifacts')
+          expected_head = os.environ['EXACT_HEAD_SHA']
+          summary = json.loads((root / 'rubiks_pregrasp_dynamic_path_audit_summary.json').read_text())
+          manifest = json.loads((root / 'rubiks_pregrasp_dynamic_path_audit_evidence.manifest.json').read_text())
+
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(message)
+
+          require(summary.get('passed') is True, summary.get('errors'))
+          require(summary.get('errors') == [], 'audit contains errors')
+          require(summary.get('source_ref') == expected_head, 'summary source_ref mismatch')
+          require(summary.get('exact_head_bound') is True, 'summary exact-head flag missing')
+          trace = summary.get('dynamic_trace', {})
+          collision = summary.get('moveit_self_collision_audit', {})
+          require(trace.get('sample_count', 0) >= 100, 'dynamic sample count too low')
+          require(trace.get('all_finite') is True, 'dynamic trace is non-finite')
+          require(trace.get('wall_time_monotonic') is True, 'wall time is not monotonic')
+          require(trace.get('ros_stamp_monotonic') is True, 'ROS stamps are not monotonic')
+          require(trace.get('max_abs_path_residual_rad', math.inf) <= 0.02, 'path tube exceeded')
+          require(trace.get('max_l2_path_residual_rad', math.inf) <= math.sqrt(6.0) * 0.02, 'L2 path tube exceeded')
+          require(trace.get('minimum_raw_path_alpha', -math.inf) >= -1e-4, 'path alpha undershoot exceeded')
+          require(trace.get('maximum_raw_path_alpha', math.inf) <= 1.0001, 'path alpha overshoot exceeded')
+          require(trace.get('max_effective_limit_violation_rad') == 0.0, 'effective joint limit violation')
+          require(collision.get('state_count') == trace.get('sample_count'), 'MoveIt state count mismatch')
+          require(collision.get('all_bounds_ok') is True, 'MoveIt bounds failure')
+          require(collision.get('all_self_collision_free') is True, 'MoveIt self collision detected')
+          require(collision.get('maximum_contact_pair_count') == 0, 'MoveIt contact pair reported')
+          require(collision.get('contact_pairs') == [], 'MoveIt contact-pair list is not empty')
+          require(collision.get('active_joint_order') == [f'joint{i}' for i in range(1, 7)], 'MoveIt joint order mismatch')
+          require(collision.get('missing_collision_geometry') == [], 'collision geometry missing')
+          require(summary.get('verified_claim') == 'recorded_empty_scene_joint_trace_within_accepted_joint_path_tube_and_self_collision_free', 'claim mismatch')
+          safety = summary.get('safety', {})
+          require(safety.get('same_two_arm_goals_only') is True, 'two-goal boundary missing')
+          require(safety.get('new_command_path_added') is False, 'new command path was added')
+          require(safety.get('simulation_only') is True and safety.get('empty_scene_only') is True, 'simulation boundary mismatch')
+          for key in (
+              'physical_hardware_used', 'cube_spawned', 'support_spawned',
+              'fixture_spawned', 'gripper_command_sent', 'base_command_sent',
+              'lift_command_sent', 'ifra_attachment_used', 'grasp_success_claimed',
+              'environment_clearance_claimed', 'hardware_readiness_claimed',
+              'production_runtime_modified',
+          ):
+              require(safety.get(key) is False, f'{key} must remain false')
+          require(manifest.get('source_ref') == expected_head, 'manifest source_ref mismatch')
+          require(manifest.get('exact_head_bound') is True, 'manifest exact-head flag missing')
+          require(manifest.get('dynamic_sample_count') == trace.get('sample_count'), 'manifest sample count mismatch')
+          require(manifest.get('moveit_checked_state_count') == trace.get('sample_count'), 'manifest MoveIt count mismatch')
+          require(len(manifest.get('inputs', {})) == 7, 'manifest input coverage mismatch')
+          print(json.dumps(summary, indent=2, sort_keys=True))
+          PY
+
+      - name: Upload dynamic path audit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-pregrasp-dynamic-path-audit-evidence
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
