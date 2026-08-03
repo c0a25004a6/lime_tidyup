@@ -1,0 +1,185 @@
+name: Rubik pregrasp empty-scene repeatability
+
+on:
+  pull_request:
+    paths:
+      - "bin/find_rubiks_pregrasp_alignment.py"
+      - "bin/rubiks_kinematic_preflight.py"
+      - "bin/capture_gazebo_model_states.py"
+      - "bin/run_rubiks_pregrasp_simulation_state.py"
+      - "bin/run_gazebo_pregrasp_simulation_state"
+      - "bin/summarize_rubiks_pregrasp_simulation_repeatability.py"
+      - "project/resource/turtlebot3_lime.urdf.xacro"
+      - "project/resource/turtlebot3_lime_arm_motion_test.urdf.xacro"
+      - "project/resource/gazebo_arm_motion_test_controller_manager.yaml"
+      - "project/resource/rubiks_grasp_calibration.world"
+      - "doc/rubiks_pregrasp_simulation_repeatability.md"
+      - "Dockerfile"
+      - ".github/workflows/rubiks-pregrasp-simulation-repeatability.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rubiks-pregrasp-empty-scene-repeatability-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  three-fresh-empty-scene-trials:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXACT_HEAD_SHA }}
+
+      - name: Validate exact checkout and repeatability boundary
+        run: |
+          test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
+          python3 -m py_compile \
+            bin/find_rubiks_pregrasp_alignment.py \
+            bin/rubiks_kinematic_preflight.py \
+            bin/capture_gazebo_model_states.py \
+            bin/run_rubiks_pregrasp_simulation_state.py \
+            bin/summarize_rubiks_pregrasp_simulation_repeatability.py
+          bash -n bin/run_gazebo_pregrasp_simulation_state
+          python3 - <<'PY'
+          from pathlib import Path
+
+          aggregator = Path('bin/summarize_rubiks_pregrasp_simulation_repeatability.py').read_text(encoding='utf-8')
+          runner = Path('bin/run_gazebo_pregrasp_simulation_state').read_text(encoding='utf-8')
+          workflow = Path('.github/workflows/rubiks-pregrasp-simulation-repeatability.yml').read_text(encoding='utf-8')
+
+          for required in (
+              'TRIAL_LABELS = ("trial_01", "trial_02", "trial_03")',
+              'fresh_container_per_trial',
+              'EXPECTED_CANDIDATE',
+              'EXPECTED_MODELS',
+              'EXPECTED_CONTROLLERS',
+              'candidate_goal',
+              'return_goal',
+              'pregrasp_world_models_before.json',
+              'pregrasp_world_models_after.json',
+              'trial_exit_status.txt',
+              'exact_head_bound',
+          ):
+              if required not in aggregator:
+                  raise SystemExit(f'aggregator lacks required repeatability gate: {required}')
+          for required in (
+              'validate_world_properties',
+              'write_controller_snapshot',
+              '/arm_controller/follow_joint_trajectory',
+              '/gripper_controller/gripper_cmd',
+              'run_rubiks_pregrasp_simulation_state.py',
+          ):
+              if required not in runner:
+                  raise SystemExit(f'base runner lacks required boundary: {required}')
+          for forbidden in ('cmd_vel', 'navigate_to_pose', 'IFRA_LinkAttacher'):
+              if forbidden in runner:
+                  raise SystemExit(f'base runner contains forbidden command path: {forbidden}')
+          if workflow.count('docker run --rm') != 1:
+              raise SystemExit('workflow must contain exactly one looped docker-run command')
+          if 'for specification in "${trials[@]}"' not in workflow:
+              raise SystemExit('workflow lacks explicit three-trial loop')
+          PY
+
+      - name: Build exact-head Lime image once
+        run: docker build -t lime-tidyup-pregrasp-repeatability:${EXACT_HEAD_SHA} .
+
+      - name: Run three fresh empty-scene trials
+        run: |
+          set -u
+          mkdir -p artifacts
+          trials=(
+            "trial_01|31"
+            "trial_02|32"
+            "trial_03|33"
+          )
+          for specification in "${trials[@]}"; do
+            IFS='|' read -r label domain_id <<<"${specification}"
+            trial_dir="$PWD/artifacts/${label}"
+            mkdir -p "${trial_dir}"
+            printf '%s\n' "${domain_id}" >"${trial_dir}/ros_domain_id.txt"
+            printf '%s\n' "${EXACT_HEAD_SHA}" >"${trial_dir}/requested_source_ref.txt"
+
+            set +e
+            docker run --rm \
+              -e ROS_DOMAIN_ID="${domain_id}" \
+              -e SOURCE_REF="${EXACT_HEAD_SHA}" \
+              -v "${trial_dir}:/artifacts" \
+              lime-tidyup-pregrasp-repeatability:${EXACT_HEAD_SHA} \
+              bash /root/bin/run_gazebo_pregrasp_simulation_state \
+                /artifacts "${EXACT_HEAD_SHA}" \
+              >"${trial_dir}/container.stdout.log" \
+              2>"${trial_dir}/container.stderr.log"
+            trial_status=$?
+            set -e
+            printf '%s\n' "${trial_status}" >"${trial_dir}/trial_exit_status.txt"
+            sleep 2
+          done
+
+      - name: Aggregate exact-head repeatability evidence
+        run: |
+          python3 bin/summarize_rubiks_pregrasp_simulation_repeatability.py \
+            --root artifacts \
+            --output artifacts/rubiks_pregrasp_simulation_repeatability_summary.json \
+            --manifest artifacts/rubiks_pregrasp_simulation_repeatability_evidence.manifest.json \
+            --source-ref "${EXACT_HEAD_SHA}"
+
+      - name: Validate aggregate safety boundary
+        run: |
+          test -s artifacts/rubiks_pregrasp_simulation_repeatability_summary.json
+          test -s artifacts/rubiks_pregrasp_simulation_repeatability_evidence.manifest.json
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path('artifacts')
+          expected_head = os.environ['EXACT_HEAD_SHA']
+          summary = json.loads((root / 'rubiks_pregrasp_simulation_repeatability_summary.json').read_text())
+          manifest = json.loads((root / 'rubiks_pregrasp_simulation_repeatability_evidence.manifest.json').read_text())
+
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(message)
+
+          require(summary.get('passed') is True, summary.get('errors'))
+          require(summary.get('errors') == [], 'aggregate contains errors')
+          require(summary.get('source_ref') == expected_head, 'aggregate source_ref mismatch')
+          require(summary.get('exact_head_bound') is True, 'aggregate is not exact-head bound')
+          require(summary.get('trial_count') == 3, 'aggregate trial count mismatch')
+          require(summary.get('required_trial_count') == 3, 'required trial count mismatch')
+          require(summary.get('fresh_container_per_trial') is True, 'fresh-container flag missing')
+          require([trial.get('label') for trial in summary.get('trials', [])] == ['trial_01', 'trial_02', 'trial_03'], 'trial labels mismatch')
+          require(all(trial.get('passed') is True for trial in summary.get('trials', [])), 'one or more trials failed')
+          require(all(trial.get('source_ref') == expected_head for trial in summary.get('trials', [])), 'trial source_ref mismatch')
+          require(all(trial.get('model_states_topic') == '/model_states' for trial in summary.get('trials', [])), 'ModelStates topic mismatch')
+          require(summary.get('simulation_only') is True, 'simulation-only flag missing')
+          require(summary.get('empty_scene_only') is True, 'empty-scene flag missing')
+          for key in (
+              'physical_hardware_used', 'cube_spawned', 'support_spawned',
+              'gripper_command_sent', 'base_command_sent', 'lift_command_sent',
+              'grasp_success_claimed', 'hardware_readiness_claimed',
+              'production_runtime_modified',
+          ):
+              require(summary.get(key) is False, f'{key} must remain false')
+          require(manifest.get('source_ref') == expected_head, 'manifest source_ref mismatch')
+          require(manifest.get('exact_head_bound') is True, 'manifest exact-head flag missing')
+          require(manifest.get('all_trials_passed') is True, 'manifest records failed trials')
+          require(manifest.get('trial_count') == 3, 'manifest trial count mismatch')
+          require(len(manifest.get('inputs', {})) >= 36, 'manifest input coverage is incomplete')
+          print(json.dumps(summary, indent=2, sort_keys=True))
+          PY
+
+      - name: Upload repeatability evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-pregrasp-empty-scene-repeatability-evidence
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
