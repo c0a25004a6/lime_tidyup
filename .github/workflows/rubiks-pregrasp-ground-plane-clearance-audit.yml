@@ -1,0 +1,267 @@
+name: Rubik pregrasp ground-plane clearance audit
+
+on:
+  pull_request:
+    paths:
+      - "bin/observe_rubiks_ground_frames.py"
+      - "bin/run_gazebo_pregrasp_ground_plane_audit"
+      - "bin/bind_rubiks_pregrasp_ground_frames.py"
+      - "bin/summarize_rubiks_pregrasp_ground_plane_clearance.py"
+      - "bin/run_gazebo_pregrasp_simulation_state"
+      - "bin/run_rubiks_pregrasp_simulation_state.py"
+      - "project/rubiks_self_collision_ws/**"
+      - "project/resource/turtlebot3_lime.urdf.xacro"
+      - "project/resource/turtlebot3_lime_arm_motion_test.urdf.xacro"
+      - "project/resource/gazebo_arm_motion_test_controller_manager.yaml"
+      - "project/resource/rubiks_grasp_calibration.world"
+      - "doc/rubiks_pregrasp_ground_plane_clearance_audit.md"
+      - "Dockerfile"
+      - ".github/workflows/rubiks-pregrasp-ground-plane-clearance-audit.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rubiks-pregrasp-ground-plane-clearance-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  exact-ground-plane-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXACT_HEAD_SHA }}
+
+      - name: Validate exact checkout and ground-audit boundary
+        run: |
+          test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
+          python3 -m py_compile \
+            bin/observe_rubiks_ground_frames.py \
+            bin/bind_rubiks_pregrasp_ground_frames.py \
+            bin/summarize_rubiks_pregrasp_ground_plane_clearance.py \
+            bin/run_rubiks_pregrasp_simulation_state.py
+          bash -n bin/run_gazebo_pregrasp_ground_plane_audit
+          bash -n bin/run_gazebo_pregrasp_simulation_state
+          RUBIK_GROUND_PLANE_BASE_RUNNER="$PWD/bin/run_gazebo_pregrasp_simulation_state" \
+          RUBIK_GROUND_PLANE_RENDER_ONLY=1 \
+          RUBIK_GROUND_PLANE_RENDER_OUTPUT=/tmp/rubiks-ground-plane-rendered-runner \
+            bash bin/run_gazebo_pregrasp_ground_plane_audit /tmp/artifacts "${EXACT_HEAD_SHA}"
+          bash -n /tmp/rubiks-ground-plane-rendered-runner
+          python3 - <<'PY'
+          from pathlib import Path
+
+          observer = Path('bin/observe_rubiks_ground_frames.py').read_text(encoding='utf-8')
+          wrapper = Path('bin/run_gazebo_pregrasp_ground_plane_audit').read_text(encoding='utf-8')
+          binder = Path('bin/bind_rubiks_pregrasp_ground_frames.py').read_text(encoding='utf-8')
+          summary = Path('bin/summarize_rubiks_pregrasp_ground_plane_clearance.py').read_text(encoding='utf-8')
+          checker = Path('project/rubiks_self_collision_ws/src/rubiks_self_collision_preflight/src/rubiks_ground_plane_clearance_preflight.cpp').read_text(encoding='utf-8')
+
+          for required in ('create_subscription', 'ModelStates', 'LinkStates', 'JointState', 'read_only_subscriptions_only'):
+              if required not in observer:
+                  raise SystemExit(f'observer lacks required read-only evidence: {required}')
+          for forbidden in ('create_publisher', 'create_client', 'ActionClient', 'send_goal', 'publish('):
+              if forbidden in observer:
+                  raise SystemExit(f'observer contains a command-capable path: {forbidden}')
+          for required in (
+              'run_gazebo_pregrasp_simulation_state', 'observe_rubiks_ground_frames.py',
+              'GROUND_OBSERVER_PID', 'RUBIK_GROUND_PLANE_RENDER_ONLY',
+          ):
+              if required not in wrapper:
+                  raise SystemExit(f'wrapper lacks required exact-base insertion: {required}')
+          for required in (
+              'MAX_AGE_S = 0.05', 'MAX_POSITION_ERROR_RAD = 1e-9',
+              'MAX_FIXED_RESIDUAL_M = 1e-5', 'base_footprint',
+              'audited_collision_geometry_exact_match', 'plane_equation_world',
+              "-x 0.0 -y 0.0 -z 0.03 -Y 0.0",
+          ):
+              if required not in binder:
+                  raise SystemExit(f'frame binder lacks required gate: {required}')
+          for required in (
+              'shapes::Plane', 'checkSelfCollision', 'checkCollision',
+              'ground_plane', 'link1', 'link7', 'base_footprint',
+              'ground_acm.setEntry',
+          ):
+              if required not in checker:
+                  raise SystemExit(f'MoveIt ground checker lacks required operation: {required}')
+          for forbidden in ('rclcpp::Node', 'ActionClient', 'MoveGroupInterface', 'create_publisher'):
+              if forbidden in checker:
+                  raise SystemExit(f'MoveIt ground checker contains a runtime command path: {forbidden}')
+          for required in (
+              'continuous_between_sample_clearance_claimed',
+              'gripper_ground_clearance_claimed', 'ground_model_only',
+              'new_command_path_added',
+          ):
+              if required not in summary:
+                  raise SystemExit(f'summary lacks claim boundary: {required}')
+          PY
+
+      - name: Build exact-head Lime image
+        run: docker build -t lime-tidyup-pregrasp-ground:${EXACT_HEAD_SHA} .
+
+      - name: Run unchanged trial and exact ground-plane audit
+        run: |
+          mkdir -p artifacts
+          docker run --rm \
+            -e ROS_DOMAIN_ID=35 \
+            -e SOURCE_REF="${EXACT_HEAD_SHA}" \
+            -v "$PWD/artifacts:/artifacts" \
+            lime-tidyup-pregrasp-ground:${EXACT_HEAD_SHA} \
+            bash -lc '
+              set -eo pipefail
+              source /opt/ros/humble/setup.bash
+              source /project/lib_ws/install/setup.bash
+              source /root/turtlebot3_ws/install/setup.bash
+
+              bash /root/bin/run_gazebo_pregrasp_ground_plane_audit \
+                /artifacts "${SOURCE_REF}"
+
+              moveit_share="$(ros2 pkg prefix --share turtlebot3_lime_moveit_config)"
+              cp "${moveit_share}/config/turtlebot3_lime.srdf" \
+                /artifacts/turtlebot3_lime.srdf
+
+              python3 /root/bin/bind_rubiks_pregrasp_ground_frames.py \
+                --simulation-summary /artifacts/rubiks_pregrasp_simulation_state_summary.json \
+                --ground-frame-trace /artifacts/rubiks_pregrasp_ground_frame_trace.json \
+                --simulation-urdf /artifacts/turtlebot3_lime_arm_motion_test.urdf \
+                --moveit-urdf /artifacts/turtlebot3_lime_pregrasp_search.urdf \
+                --world /project/resource/rubiks_grasp_calibration.world \
+                --base-runner /root/bin/run_gazebo_pregrasp_simulation_state \
+                --states-tsv /artifacts/rubiks_pregrasp_ground_plane_states.tsv \
+                --output /artifacts/rubiks_pregrasp_ground_frame_binding.json \
+                --source-ref "${SOURCE_REF}"
+
+              colcon build \
+                --merge-install \
+                --base-paths /project/rubiks_self_collision_ws/src \
+                --build-base /tmp/rubiks_ground_collision_build \
+                --install-base /tmp/rubiks_ground_collision_install \
+                --cmake-args -DCMAKE_BUILD_TYPE=Release \
+                --event-handlers console_direct+
+              source /tmp/rubiks_ground_collision_install/setup.bash
+
+              /tmp/rubiks_ground_collision_install/lib/rubiks_self_collision_preflight/rubiks_ground_plane_clearance_preflight \
+                /artifacts/turtlebot3_lime_pregrasp_search.urdf \
+                /artifacts/turtlebot3_lime.srdf \
+                /artifacts/rubiks_pregrasp_ground_plane_states.tsv \
+                /artifacts/rubiks_pregrasp_ground_plane_collision_results.tsv
+
+              python3 /root/bin/summarize_rubiks_pregrasp_ground_plane_clearance.py \
+                --simulation-summary /artifacts/rubiks_pregrasp_simulation_state_summary.json \
+                --ground-frame-trace /artifacts/rubiks_pregrasp_ground_frame_trace.json \
+                --frame-binding /artifacts/rubiks_pregrasp_ground_frame_binding.json \
+                --states-tsv /artifacts/rubiks_pregrasp_ground_plane_states.tsv \
+                --collision-results /artifacts/rubiks_pregrasp_ground_plane_collision_results.tsv \
+                --simulation-urdf /artifacts/turtlebot3_lime_arm_motion_test.urdf \
+                --moveit-urdf /artifacts/turtlebot3_lime_pregrasp_search.urdf \
+                --srdf /artifacts/turtlebot3_lime.srdf \
+                --world /project/resource/rubiks_grasp_calibration.world \
+                --base-runner /root/bin/run_gazebo_pregrasp_simulation_state \
+                --output /artifacts/rubiks_pregrasp_ground_plane_clearance_summary.json \
+                --manifest /artifacts/rubiks_pregrasp_ground_plane_clearance_evidence.manifest.json \
+                --source-ref "${SOURCE_REF}"
+            ' >artifacts/ground_plane_audit.stdout.log \
+              2>artifacts/ground_plane_audit.stderr.log
+
+      - name: Validate exact-head ground-plane evidence
+        run: |
+          test -s artifacts/rubiks_pregrasp_ground_plane_clearance_summary.json
+          test -s artifacts/rubiks_pregrasp_ground_plane_clearance_evidence.manifest.json
+          python3 - <<'PY'
+          import json
+          import math
+          import os
+          from pathlib import Path
+
+          root = Path('artifacts')
+          expected_head = os.environ['EXACT_HEAD_SHA']
+          summary = json.loads((root / 'rubiks_pregrasp_ground_plane_clearance_summary.json').read_text())
+          manifest = json.loads((root / 'rubiks_pregrasp_ground_plane_clearance_evidence.manifest.json').read_text())
+
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(message)
+
+          require(summary.get('passed') is True, summary.get('errors'))
+          require(summary.get('errors') == [], 'ground audit contains errors')
+          require(summary.get('source_ref') == expected_head, 'summary source_ref mismatch')
+          require(summary.get('exact_head_bound') is True, 'summary exact-head flag missing')
+
+          binding = summary.get('frame_binding', {})
+          dynamic = binding.get('dynamic_frame_binding', {})
+          world = binding.get('world', {})
+          spawn = binding.get('spawn_contract', {})
+          models = binding.get('robot_model_binding', {})
+          require(binding.get('passed') is True, 'frame binding failed')
+          require(binding.get('state_count', 0) >= 100, 'bound state count too low')
+          require(dynamic.get('all_samples_matched') is True, 'not all samples were frame-bound')
+          require(dynamic.get('matched_sample_count') == binding.get('state_count'), 'bound sample count mismatch')
+          require(dynamic.get('maximum_position_match_error_rad', math.inf) <= 1e-9, 'joint sample match error')
+          require(dynamic.get('maximum_model_state_age_s', math.inf) <= 0.05, 'model-state observation stale')
+          require(dynamic.get('maximum_base_link_state_age_s', math.inf) <= 0.05, 'link-state observation stale')
+          require(dynamic.get('maximum_model_to_base_link_translation_residual_m', math.inf) <= 1e-5, 'model/base transform drift')
+          require(dynamic.get('maximum_model_to_base_link_rotation_residual_rad', math.inf) <= 1e-5, 'model/base rotation drift')
+          require(models.get('root_transform_exact_match') is True, 'simulation/MoveIt root transform mismatch')
+          require(models.get('audited_collision_geometry_exact_match') is True, 'simulation/MoveIt collision geometry mismatch')
+          require(world.get('model_name') == 'ground_plane', 'ground model mismatch')
+          require(world.get('plane_normal_world') == [0.0, 0.0, 1.0], 'ground normal mismatch')
+          require(world.get('declared_size_m') == [6.0, 6.0], 'ground size mismatch')
+          require(world.get('plane_equation_world') == [0.0, 0.0, 1.0, 0.0], 'ground equation mismatch')
+          require(spawn.get('requested_model_pose_world', {}).get('position_m') == [0, 0, 0.03], 'spawn transform mismatch')
+
+          collision = summary.get('moveit_ground_plane_audit', {})
+          require(collision.get('state_count') == binding.get('state_count'), 'MoveIt state count mismatch')
+          require(collision.get('robot_name') == 'turtlebot3_lime', 'MoveIt model mismatch')
+          require(collision.get('root_link') == 'base_footprint', 'MoveIt root mismatch')
+          require(collision.get('active_joint_order') == [f'joint{i}' for i in range(1, 7)], 'joint order mismatch')
+          require(collision.get('audited_ground_links') == [f'link{i}' for i in range(1, 8)], 'audited link set mismatch')
+          require(collision.get('missing_collision_geometry') == [], 'audited geometry missing')
+          require(collision.get('all_bounds_ok') is True, 'MoveIt bounds failure')
+          require(collision.get('all_self_collision_free') is True, 'self collision detected')
+          require(collision.get('all_audited_links_ground_clear') is True, 'arm-ground collision detected')
+          require(collision.get('maximum_ground_contact_pair_count') == 0, 'ground contacts reported')
+          require(collision.get('maximum_self_contact_pair_count') == 0, 'self contacts reported')
+          require(collision.get('ground_contact_pairs') == [], 'ground contact pair set is nonempty')
+          require(collision.get('self_contact_pairs') == [], 'self contact pair set is nonempty')
+
+          limits = summary.get('claim_limits', {})
+          require(limits.get('audited_links_only') == [f'link{i}' for i in range(1, 8)], 'claim link set mismatch')
+          for key in (
+              'populated_scene_clearance_claimed', 'cube_or_support_clearance_claimed',
+              'gripper_ground_clearance_claimed', 'continuous_between_sample_clearance_claimed',
+              'hardware_readiness_claimed',
+          ):
+              require(limits.get(key) is False, f'{key} must remain false')
+          safety = summary.get('safety', {})
+          require(safety.get('same_two_arm_goals_only') is True, 'two-goal boundary missing')
+          require(safety.get('read_only_frame_observer') is True, 'observer boundary missing')
+          require(safety.get('offline_ground_object_only') is True, 'ground object was not offline-only')
+          for key in (
+              'new_command_path_added', 'physical_hardware_used', 'cube_spawned',
+              'support_spawned', 'fixture_spawned', 'gripper_command_sent',
+              'base_command_sent', 'lift_command_sent', 'ifra_attachment_used',
+              'production_runtime_modified',
+          ):
+              require(safety.get(key) is False, f'{key} must remain false')
+
+          require(manifest.get('source_ref') == expected_head, 'manifest source_ref mismatch')
+          require(manifest.get('exact_head_bound') is True, 'manifest exact-head flag missing')
+          require(manifest.get('all_states_passed') is True, 'manifest records failed states')
+          require(manifest.get('state_count') == binding.get('state_count'), 'manifest state count mismatch')
+          require(manifest.get('moveit_checked_state_count') == binding.get('state_count'), 'manifest MoveIt count mismatch')
+          require(len(manifest.get('inputs', {})) == 10, 'manifest input coverage mismatch')
+          print(json.dumps(summary, indent=2, sort_keys=True))
+          PY
+
+      - name: Upload ground-plane clearance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-pregrasp-ground-plane-clearance-evidence
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
