@@ -81,8 +81,13 @@ jobs:
           for forbidden in ('cmd_vel', 'navigate_to_pose'):
               if forbidden in runner:
                   raise SystemExit(f'base runner contains forbidden command path: {forbidden}')
-          if workflow.count('docker run --rm') != 1:
-              raise SystemExit('workflow must contain exactly one looped docker-run command')
+          docker_run_lines = [
+              line.strip()
+              for line in workflow.splitlines()
+              if line.strip().startswith('docker run --rm')
+          ]
+          if len(docker_run_lines) != 1:
+              raise SystemExit(f'workflow must contain one executable docker-run line: {docker_run_lines}')
           if 'for specification in "${trials[@]}"' not in workflow:
               raise SystemExit('workflow lacks explicit three-trial loop')
           PY
