@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ARTIFACT_DIR="${1:-/artifacts}"
+SOURCE_REF="${2:-unknown}"
+BASE_RUNNER="/root/bin/run_gazebo_pregrasp_simulation_state"
+PATCHED_RUNNER="$(mktemp /tmp/rubiks-ground-plane-runner.XXXXXX)"
+trap 'rm -f "${PATCHED_RUNNER}"' EXIT
+
+python3 - "${BASE_RUNNER}" "${PATCHED_RUNNER}" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text(encoding="utf-8")
+output = Path(sys.argv[2])
+
+cleanup_anchor = 'for pid in "${GZSERVER_PID:-}" "${RSP_PID:-}"; do'
+if source.count(cleanup_anchor) != 2:
+    raise SystemExit(f"unexpected cleanup loop count: {source.count(cleanup_anchor)}")
+source = source.replace(
+    cleanup_anchor,
+    'for pid in "${GROUND_OBSERVER_PID:-}" "${GZSERVER_PID:-}" "${RSP_PID:-}"; do',
+)
+
+before_anchor = 'validate_world_properties "${ARTIFACT_DIR}/pregrasp_world_models_before.json"\n\nset +e\n'
+if source.count(before_anchor) != 1:
+    raise SystemExit("base runner lacks unique pre-trial world-state anchor")
+observer_start = r'''GROUND_FRAME_TRACE="${ARTIFACT_DIR}/rubiks_pregrasp_ground_frame_trace.json"
+GROUND_FRAME_READY="${ARTIFACT_DIR}/rubiks_pregrasp_ground_frame.ready"
+rm -f "${GROUND_FRAME_TRACE}" "${GROUND_FRAME_READY}"
+python3 /root/bin/observe_rubiks_ground_frames.py \
+  --model "${MODEL_NAME}" \
+  --output "${GROUND_FRAME_TRACE}" \
+  --ready-file "${GROUND_FRAME_READY}" \
+  --source-ref "${SOURCE_REF}" \
+  >"${ARTIFACT_DIR}/rubiks_pregrasp_ground_frame.stdout.log" \
+  2>"${ARTIFACT_DIR}/rubiks_pregrasp_ground_frame.stderr.log" &
+GROUND_OBSERVER_PID=$!
+for _ in $(seq 1 200); do
+  if [[ -s "${GROUND_FRAME_READY}" ]]; then break; fi
+  kill -0 "${GROUND_OBSERVER_PID}" 2>/dev/null || {
+    cat "${ARTIFACT_DIR}/rubiks_pregrasp_ground_frame.stderr.log" >&2 || true
+    exit 10
+  }
+  sleep 0.05
+done
+[[ -s "${GROUND_FRAME_READY}" ]] || {
+  echo "ground-frame observer did not become ready" >&2
+  exit 10
+}
+
+validate_world_properties "${ARTIFACT_DIR}/pregrasp_world_models_before.json"
+
+set +e
+'''
+source = source.replace(before_anchor, observer_start)
+
+after_anchor = 'validate_world_properties "${ARTIFACT_DIR}/pregrasp_world_models_after.json"\n\npython3 - "${ARTIFACT_DIR}/pregrasp_world_models_before.json"'
+if source.count(after_anchor) != 1:
+    raise SystemExit("base runner lacks unique post-trial world-state anchor")
+observer_stop = r'''validate_world_properties "${ARTIFACT_DIR}/pregrasp_world_models_after.json"
+
+kill -INT "${GROUND_OBSERVER_PID}" 2>/dev/null || true
+set +e
+wait "${GROUND_OBSERVER_PID}"
+GROUND_OBSERVER_STATUS=$?
+set -e
+unset GROUND_OBSERVER_PID
+if [[ ${GROUND_OBSERVER_STATUS} -ne 0 ]]; then
+  echo "ground-frame observer failed with status ${GROUND_OBSERVER_STATUS}" >&2
+  cat "${ARTIFACT_DIR}/rubiks_pregrasp_ground_frame.stderr.log" >&2 || true
+  exit 11
+fi
+[[ -s "${GROUND_FRAME_TRACE}" ]] || {
+  echo "ground-frame trace is missing" >&2
+  exit 11
+}
+
+python3 - "${ARTIFACT_DIR}/pregrasp_world_models_before.json"'''
+source = source.replace(after_anchor, observer_stop)
+
+output.write_text(source, encoding="utf-8")
+PY
+
+chmod +x "${PATCHED_RUNNER}"
+bash "${PATCHED_RUNNER}" "${ARTIFACT_DIR}" "${SOURCE_REF}"
