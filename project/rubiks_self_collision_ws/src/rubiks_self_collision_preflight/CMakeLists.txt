@@ -14,46 +14,25 @@ find_package(urdf REQUIRED)
 
 add_executable(rubiks_self_collision_preflight src/rubiks_self_collision_preflight.cpp)
 target_compile_features(rubiks_self_collision_preflight PUBLIC cxx_std_17)
-ament_target_dependencies(
-  rubiks_self_collision_preflight
-  moveit_core
-  moveit_ros_planning
-  srdfdom
-  urdf
-)
+ament_target_dependencies(rubiks_self_collision_preflight moveit_core moveit_ros_planning srdfdom urdf)
 
-add_executable(
-  rubiks_ground_plane_clearance_preflight
-  src/rubiks_ground_plane_clearance_preflight.cpp
-)
+add_executable(rubiks_ground_plane_clearance_preflight src/rubiks_ground_plane_clearance_preflight.cpp)
 target_compile_features(rubiks_ground_plane_clearance_preflight PUBLIC cxx_std_17)
-ament_target_dependencies(
-  rubiks_ground_plane_clearance_preflight
-  geometric_shapes
-  moveit_core
-  moveit_ros_planning
-  srdfdom
-  urdf
-)
+ament_target_dependencies(rubiks_ground_plane_clearance_preflight geometric_shapes moveit_core moveit_ros_planning srdfdom urdf)
 
-add_executable(
-  rubiks_gripper_ground_clearance_preflight
-  src/rubiks_gripper_ground_clearance_preflight.cpp
-)
+add_executable(rubiks_gripper_ground_clearance_preflight src/rubiks_gripper_ground_clearance_preflight.cpp)
 target_compile_features(rubiks_gripper_ground_clearance_preflight PUBLIC cxx_std_17)
-ament_target_dependencies(
-  rubiks_gripper_ground_clearance_preflight
-  geometric_shapes
-  moveit_core
-  moveit_ros_planning
-  srdfdom
-  urdf
-)
+ament_target_dependencies(rubiks_gripper_ground_clearance_preflight geometric_shapes moveit_core moveit_ros_planning srdfdom urdf)
+
+add_executable(rubiks_fixture_placement_offline_preflight src/rubiks_fixture_placement_offline_preflight.cpp)
+target_compile_features(rubiks_fixture_placement_offline_preflight PUBLIC cxx_std_17)
+ament_target_dependencies(rubiks_fixture_placement_offline_preflight geometric_shapes moveit_core moveit_ros_planning srdfdom urdf)
 
 install(TARGETS
   rubiks_self_collision_preflight
   rubiks_ground_plane_clearance_preflight
   rubiks_gripper_ground_clearance_preflight
+  rubiks_fixture_placement_offline_preflight
   DESTINATION lib/${PROJECT_NAME}
 )
 
