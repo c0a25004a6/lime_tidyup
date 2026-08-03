@@ -12,6 +12,7 @@ from typing import Any
 
 import rclpy
 from gazebo_msgs.msg import LinkStates, ModelStates
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
@@ -130,7 +131,8 @@ class GroundFrameObserver(Node):
         self.arm_samples.append(sample)
 
     def ready(self) -> bool:
-        return bool(self.arm_samples and self.latest_model and self.latest_base_link)
+        root_observed = self.latest_base_footprint is not None or self.latest_base_link is not None
+        return bool(self.arm_samples and self.latest_model and root_observed)
 
 
 def main() -> int:
@@ -162,11 +164,14 @@ def main() -> int:
                 ready_file.parent.mkdir(parents=True, exist_ok=True)
                 ready_file.write_text("ready\n", encoding="utf-8")
         exit_code = 0 if node.ready() else 1
+    except ExternalShutdownException:
+        # Humble raises this when the process receives the requested shutdown signal.
+        exit_code = 0 if node.ready() else 1
     except Exception as error:
         node.errors.append(f"{type(error).__name__}: {error}")
     finally:
         payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "phase": "RUBIK-PREGRASP-GROUND-FRAME-OBSERVATION",
             "source_ref": args.source_ref,
             "model_name": args.model,
@@ -178,9 +183,13 @@ def main() -> int:
             "link_names": node.link_names,
             "arm_joint_order": ARM_JOINTS,
             "arm_sample_count": len(node.arm_samples),
+            "base_link_observed": any(
+                sample.get("base_link_state") is not None for sample in node.arm_samples
+            ),
             "base_footprint_observed": any(
                 sample.get("base_footprint_state") is not None for sample in node.arm_samples
             ),
+            "root_observation_policy": "prefer_direct_base_footprint_else_infer_from_base_link",
             "samples": node.arm_samples,
             "safety": {
                 "read_only_subscriptions_only": True,
@@ -194,7 +203,8 @@ def main() -> int:
         output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         print(json.dumps(payload, indent=2, sort_keys=True))
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
     return 0 if payload.get("passed") else 1
 
 
