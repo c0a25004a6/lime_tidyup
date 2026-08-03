@@ -18,8 +18,11 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 from sensor_msgs.msg import JointState
 
 ARM_JOINTS = [f"joint{i}" for i in range(1, 7)]
-GRIPPER_JOINTS = ["gripper_left_joint", "gripper_right_joint"]
-REQUIRED_JOINTS = ARM_JOINTS + GRIPPER_JOINTS
+MODEL_GRIPPER_JOINTS = ["gripper_left_joint", "gripper_right_joint"]
+SOURCE_ALIASES = {
+    "gripper_left_joint": ["gripper_left_joint"],
+    "gripper_right_joint": ["gripper_right_joint", "gripper_right_joint_mimic"],
+}
 
 
 def finite(values: list[float]) -> bool:
@@ -28,6 +31,13 @@ def finite(values: list[float]) -> bool:
 
 def stamp_ns(message: Any) -> int:
     return int(message.header.stamp.sec) * 1_000_000_000 + int(message.header.stamp.nanosec)
+
+
+def choose_source_name(available: set[str], model_name: str) -> str | None:
+    matches = [name for name in SOURCE_ALIASES[model_name] if name in available]
+    if len(matches) != 1:
+        return None
+    return matches[0]
 
 
 class GripperStateObserver(Node):
@@ -43,6 +53,7 @@ class GripperStateObserver(Node):
         self.joint_state_joint_names: list[str] = []
         self.dynamic_joint_names: list[str] = []
         self.dynamic_interface_inventory: dict[str, list[str]] = {}
+        self.latest_graph_snapshot: list[dict[str, Any]] = []
         self.errors: list[str] = []
         qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -68,9 +79,14 @@ class GripperStateObserver(Node):
         gripper_velocities: list[float] | None,
         source_joint_names: list[str],
         source_interfaces: dict[str, list[str]],
+        gripper_source_joint_names: list[str],
     ) -> None:
         positions = arm_positions + gripper_positions
-        velocities = None if arm_velocities is None or gripper_velocities is None else arm_velocities + gripper_velocities
+        velocities = (
+            None
+            if arm_velocities is None or gripper_velocities is None
+            else arm_velocities + gripper_velocities
+        )
         self.samples.append(
             {
                 "source_topic": source_topic,
@@ -78,7 +94,12 @@ class GripperStateObserver(Node):
                 "ros_stamp_ns": ros_stamp_ns,
                 "source_joint_names": source_joint_names,
                 "source_interfaces": source_interfaces,
-                "required_joint_order": REQUIRED_JOINTS,
+                "arm_joint_order": ARM_JOINTS,
+                "model_gripper_joint_order": MODEL_GRIPPER_JOINTS,
+                "gripper_source_joint_names": gripper_source_joint_names,
+                "right_source_is_ros2_control_mimic_alias": (
+                    gripper_source_joint_names[1] == "gripper_right_joint_mimic"
+                ),
                 "arm_positions_rad": arm_positions,
                 "gripper_positions_m": gripper_positions,
                 "arm_velocities_rad_s": arm_velocities,
@@ -94,24 +115,44 @@ class GripperStateObserver(Node):
         names = [str(name) for name in message.name]
         self.joint_state_joint_names = names
         index = {name: position for position, name in enumerate(names)}
-        if any(name not in index for name in REQUIRED_JOINTS):
+        available = set(index)
+        gripper_sources = [
+            choose_source_name(available, model_name) for model_name in MODEL_GRIPPER_JOINTS
+        ]
+        if any(name not in index for name in ARM_JOINTS) or any(
+            source is None for source in gripper_sources
+        ):
             self.joint_state_messages_missing_required_joints += 1
             return
         if len(message.position) < len(names):
             self.errors.append("JointState position array is shorter than name array")
             return
-        positions = [float(message.position[index[name]]) for name in REQUIRED_JOINTS]
+        concrete_sources = [str(source) for source in gripper_sources]
+        arm_positions = [float(message.position[index[name]]) for name in ARM_JOINTS]
+        gripper_positions = [
+            float(message.position[index[name]]) for name in concrete_sources
+        ]
         velocity_available = len(message.velocity) >= len(names)
-        velocities = [float(message.velocity[index[name]]) for name in REQUIRED_JOINTS] if velocity_available else None
+        arm_velocities = (
+            [float(message.velocity[index[name]]) for name in ARM_JOINTS]
+            if velocity_available
+            else None
+        )
+        gripper_velocities = (
+            [float(message.velocity[index[name]]) for name in concrete_sources]
+            if velocity_available
+            else None
+        )
         self._append_sample(
             source_topic="/joint_states",
             ros_stamp_ns=stamp_ns(message),
-            arm_positions=positions[: len(ARM_JOINTS)],
-            gripper_positions=positions[len(ARM_JOINTS) :],
-            arm_velocities=None if velocities is None else velocities[: len(ARM_JOINTS)],
-            gripper_velocities=None if velocities is None else velocities[len(ARM_JOINTS) :],
+            arm_positions=arm_positions,
+            gripper_positions=gripper_positions,
+            arm_velocities=arm_velocities,
+            gripper_velocities=gripper_velocities,
             source_joint_names=names,
             source_interfaces={name: ["position", "velocity", "effort"] for name in names},
+            gripper_source_joint_names=concrete_sources,
         )
 
     def _dynamic_callback(self, message: DynamicJointState) -> None:
@@ -127,46 +168,62 @@ class GripperStateObserver(Node):
             interfaces = [str(value) for value in interface_value.interface_names]
             inventory[name] = interfaces
             if len(interfaces) != len(interface_value.values):
-                self.errors.append(f"DynamicJointState interface/value length mismatch for {name}")
+                self.errors.append(
+                    f"DynamicJointState interface/value length mismatch for {name}"
+                )
                 return
             values_by_joint[name] = {
                 interface: float(value)
                 for interface, value in zip(interfaces, interface_value.values)
             }
         self.dynamic_interface_inventory = inventory
-        if any(name not in values_by_joint for name in REQUIRED_JOINTS):
+        available = set(values_by_joint)
+        gripper_sources = [
+            choose_source_name(available, model_name) for model_name in MODEL_GRIPPER_JOINTS
+        ]
+        if any(name not in values_by_joint for name in ARM_JOINTS) or any(
+            source is None for source in gripper_sources
+        ):
             self.dynamic_messages_missing_required_joints += 1
             return
+        concrete_sources = [str(source) for source in gripper_sources]
+        required_sources = ARM_JOINTS + concrete_sources
         if any(
-            "position" not in values_by_joint[name] or "velocity" not in values_by_joint[name]
-            for name in REQUIRED_JOINTS
+            "position" not in values_by_joint[name]
+            or "velocity" not in values_by_joint[name]
+            for name in required_sources
         ):
             self.dynamic_messages_missing_required_interfaces += 1
             return
-        arm_positions = [values_by_joint[name]["position"] for name in ARM_JOINTS]
-        gripper_positions = [values_by_joint[name]["position"] for name in GRIPPER_JOINTS]
-        arm_velocities = [values_by_joint[name]["velocity"] for name in ARM_JOINTS]
-        gripper_velocities = [values_by_joint[name]["velocity"] for name in GRIPPER_JOINTS]
         self._append_sample(
             source_topic="/dynamic_joint_states",
             ros_stamp_ns=stamp_ns(message),
-            arm_positions=arm_positions,
-            gripper_positions=gripper_positions,
-            arm_velocities=arm_velocities,
-            gripper_velocities=gripper_velocities,
+            arm_positions=[values_by_joint[name]["position"] for name in ARM_JOINTS],
+            gripper_positions=[
+                values_by_joint[name]["position"] for name in concrete_sources
+            ],
+            arm_velocities=[values_by_joint[name]["velocity"] for name in ARM_JOINTS],
+            gripper_velocities=[
+                values_by_joint[name]["velocity"] for name in concrete_sources
+            ],
             source_joint_names=names,
             source_interfaces=inventory,
+            gripper_source_joint_names=concrete_sources,
         )
 
-    def graph_snapshot(self) -> list[dict[str, Any]]:
+    def refresh_graph_snapshot(self) -> None:
         try:
-            graph = self.get_topic_names_and_types(no_demangle=False)
-        except TypeError:
-            graph = self.get_topic_names_and_types()
-        return [
-            {"topic": str(topic), "types": sorted(str(value) for value in types)}
-            for topic, types in sorted(graph, key=lambda item: str(item[0]))
-        ]
+            try:
+                graph = self.get_topic_names_and_types(no_demangle=False)
+            except TypeError:
+                graph = self.get_topic_names_and_types()
+            self.latest_graph_snapshot = [
+                {"topic": str(topic), "types": sorted(str(value) for value in types)}
+                for topic, types in sorted(graph, key=lambda item: str(item[0]))
+            ]
+        except Exception:
+            # Keep the last valid graph snapshot. Shutdown invalidates the Humble node context.
+            pass
 
 
 def main() -> int:
@@ -187,9 +244,14 @@ def main() -> int:
     node = GripperStateObserver()
     exit_code = 1
     payload: dict[str, Any] = {}
+    next_graph_refresh = 0.0
     try:
         while rclpy.ok() and not stop:
             rclpy.spin_once(node, timeout_sec=0.05)
+            now = time.monotonic()
+            if now >= next_graph_refresh:
+                node.refresh_graph_snapshot()
+                next_graph_refresh = now + 1.0
         exit_code = 0 if node.samples else 1
     except ExternalShutdownException:
         exit_code = 0 if node.samples else 1
@@ -197,8 +259,14 @@ def main() -> int:
         node.errors.append(f"{type(error).__name__}: {error}")
     finally:
         passed = exit_code == 0 and not node.errors and bool(node.samples)
+        source_name_sets = sorted(
+            {
+                tuple(sample["gripper_source_joint_names"])
+                for sample in node.samples
+            }
+        )
         payload = {
-            "schema_version": 2,
+            "schema_version": 3,
             "phase": "RUBIK-PREGRASP-GRIPPER-STATE-OBSERVATION",
             "source_ref": args.source_ref,
             "passed": passed,
@@ -206,21 +274,30 @@ def main() -> int:
             "started_monotonic_ns": node.started_monotonic_ns,
             "finished_monotonic_ns": time.monotonic_ns(),
             "observed_topics": ["/joint_states", "/dynamic_joint_states"],
-            "topic_graph_snapshot": node.graph_snapshot(),
+            "topic_graph_snapshot": node.latest_graph_snapshot,
             "arm_joint_order": ARM_JOINTS,
-            "gripper_joint_order": GRIPPER_JOINTS,
-            "required_joint_order": REQUIRED_JOINTS,
+            "gripper_joint_order": MODEL_GRIPPER_JOINTS,
+            "gripper_source_alias_contract": SOURCE_ALIASES,
+            "observed_gripper_source_joint_name_sets": [list(value) for value in source_name_sets],
             "joint_state_messages_seen": node.joint_state_messages_seen,
-            "joint_state_messages_missing_required_joints": node.joint_state_messages_missing_required_joints,
+            "joint_state_messages_missing_required_joints": (
+                node.joint_state_messages_missing_required_joints
+            ),
             "joint_state_joint_names": node.joint_state_joint_names,
             "dynamic_messages_seen": node.dynamic_messages_seen,
-            "dynamic_messages_missing_required_joints": node.dynamic_messages_missing_required_joints,
-            "dynamic_messages_missing_required_interfaces": node.dynamic_messages_missing_required_interfaces,
+            "dynamic_messages_missing_required_joints": (
+                node.dynamic_messages_missing_required_joints
+            ),
+            "dynamic_messages_missing_required_interfaces": (
+                node.dynamic_messages_missing_required_interfaces
+            ),
             "dynamic_joint_names": node.dynamic_joint_names,
             "dynamic_interface_inventory": node.dynamic_interface_inventory,
             "sample_count": len(node.samples),
             "sample_source_counts": {
-                topic: sum(1 for sample in node.samples if sample["source_topic"] == topic)
+                topic: sum(
+                    1 for sample in node.samples if sample["source_topic"] == topic
+                )
                 for topic in ("/joint_states", "/dynamic_joint_states")
             },
             "samples": node.samples,
@@ -235,7 +312,9 @@ def main() -> int:
         }
         output = Path(args.output)
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        output.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
         print(json.dumps(payload, indent=2, sort_keys=True))
         node.destroy_node()
         if rclpy.ok():
