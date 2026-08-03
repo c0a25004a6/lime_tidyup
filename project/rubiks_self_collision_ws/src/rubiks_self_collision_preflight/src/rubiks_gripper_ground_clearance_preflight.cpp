@@ -22,7 +22,8 @@
 
 namespace
 {
-constexpr double MAX_MIMIC_MODEL_RESIDUAL_M = 1e-9;
+constexpr double MAX_INTERNAL_MODEL_MIMIC_RESIDUAL_M = 1e-12;
+constexpr double MAX_MEASURED_TO_MODEL_PROJECTION_RESIDUAL_M = 1e-6;
 
 std::string read_file(const std::string& path)
 {
@@ -241,7 +242,8 @@ int main(int argc, char** argv)
            << join(active_arm_joints, ",") << "\tgripper_left_joint,gripper_right_joint\t"
            << join(audited_links, ",") << "\t" << join(missing_geometry, ",") << "\t"
            << srdf_model->getDisabledCollisionPairs().size() << "\t"
-           << allowed_ground_link_count << "\t" << MAX_MIMIC_MODEL_RESIDUAL_M << "\n";
+           << allowed_ground_link_count << "\t" << MAX_INTERNAL_MODEL_MIMIC_RESIDUAL_M << "\t"
+           << MAX_MEASURED_TO_MODEL_PROJECTION_RESIDUAL_M << "\n";
     output.flush();
 
     collision_detection::CollisionRequest self_request;
@@ -264,9 +266,15 @@ int main(int argc, char** argv)
       state.setJointGroupPositions(arm_group, audit.arm_positions);
       state.setVariablePosition("gripper_left_joint", audit.left_gripper_position);
       state.update();
+
       const double modeled_right = state.getVariablePosition("gripper_right_joint");
-      const double mimic_model_residual = std::abs(modeled_right - audit.right_gripper_position);
-      const bool mimic_model_match = mimic_model_residual <= MAX_MIMIC_MODEL_RESIDUAL_M;
+      const double internal_model_residual = std::abs(modeled_right - audit.left_gripper_position);
+      const bool internal_model_match =
+        internal_model_residual <= MAX_INTERNAL_MODEL_MIMIC_RESIDUAL_M;
+      const double measured_projection_residual =
+        std::abs(modeled_right - audit.right_gripper_position);
+      const bool measured_projection_match =
+        measured_projection_residual <= MAX_MEASURED_TO_MODEL_PROJECTION_RESIDUAL_M;
       const bool bounds_ok = state.satisfiesBounds(0.0);
 
       collision_detection::CollisionResult self_result;
@@ -287,9 +295,11 @@ int main(int argc, char** argv)
       const auto ground_pairs = contact_pairs(ground_result);
 
       output << "STATE\t" << audit.label << "\t" << (bounds_ok ? "true" : "false") << "\t"
-             << (mimic_model_match ? "true" : "false") << "\t" << mimic_model_residual << "\t"
-             << audit.left_gripper_position << "\t" << audit.right_gripper_position << "\t"
-             << modeled_right << "\t" << (self_result.collision ? "true" : "false") << "\t"
+             << (internal_model_match ? "true" : "false") << "\t" << internal_model_residual << "\t"
+             << (measured_projection_match ? "true" : "false") << "\t"
+             << measured_projection_residual << "\t" << audit.left_gripper_position << "\t"
+             << audit.right_gripper_position << "\t" << modeled_right << "\t"
+             << (self_result.collision ? "true" : "false") << "\t"
              << (ground_result.collision ? "true" : "false") << "\t"
              << ground_pairs.size() << "\t" << join_set(ground_pairs, ",") << "\t"
              << self_pairs.size() << "\t" << join_set(self_pairs, ",") << "\n";
