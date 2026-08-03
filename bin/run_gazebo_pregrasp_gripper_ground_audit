@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ARTIFACT_DIR="${1:-/artifacts}"
+SOURCE_REF="${2:-unknown}"
+BASE_GROUND_RUNNER="${RUBIK_GRIPPER_GROUND_BASE_RUNNER:-/root/bin/run_gazebo_pregrasp_ground_plane_audit}"
+GRIPPER_TRACE="${ARTIFACT_DIR}/rubiks_pregrasp_gripper_state_trace.json"
+GRIPPER_STDOUT="${ARTIFACT_DIR}/rubiks_pregrasp_gripper_state.stdout.log"
+GRIPPER_STDERR="${ARTIFACT_DIR}/rubiks_pregrasp_gripper_state.stderr.log"
+GRIPPER_EXIT_STATUS="${ARTIFACT_DIR}/rubiks_pregrasp_gripper_state.exit_status.txt"
+mkdir -p "${ARTIFACT_DIR}"
+rm -f "${GRIPPER_TRACE}" "${GRIPPER_STDOUT}" "${GRIPPER_STDERR}" "${GRIPPER_EXIT_STATUS}"
+
+cleanup() {
+  status=$?
+  if [[ -n "${GRIPPER_OBSERVER_PID:-}" ]] && kill -0 "${GRIPPER_OBSERVER_PID}" 2>/dev/null; then
+    kill -INT "${GRIPPER_OBSERVER_PID}" 2>/dev/null || true
+    wait "${GRIPPER_OBSERVER_PID}" 2>/dev/null || true
+  fi
+  exit "${status}"
+}
+trap cleanup EXIT INT TERM
+
+python3 /root/bin/observe_rubiks_gripper_states.py \
+  --output "${GRIPPER_TRACE}" \
+  --source-ref "${SOURCE_REF}" \
+  >"${GRIPPER_STDOUT}" \
+  2>"${GRIPPER_STDERR}" &
+GRIPPER_OBSERVER_PID=$!
+sleep 0.2
+kill -0 "${GRIPPER_OBSERVER_PID}" 2>/dev/null || {
+  cat "${GRIPPER_STDERR}" >&2 || true
+  exit 20
+}
+
+bash "${BASE_GROUND_RUNNER}" "${ARTIFACT_DIR}" "${SOURCE_REF}"
+
+kill -INT "${GRIPPER_OBSERVER_PID}" 2>/dev/null || true
+set +e
+wait "${GRIPPER_OBSERVER_PID}"
+observer_status=$?
+set -e
+printf '%s\n' "${observer_status}" >"${GRIPPER_EXIT_STATUS}"
+unset GRIPPER_OBSERVER_PID
+
+[[ -s "${GRIPPER_TRACE}" ]] || {
+  echo "gripper state trace is missing" >&2
+  exit 21
+}
+python3 - "${GRIPPER_TRACE}" "${SOURCE_REF}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+trace = json.loads(Path(sys.argv[1]).read_text())
+expected = sys.argv[2]
+if trace.get("passed") is not True:
+    raise SystemExit(trace.get("errors"))
+if trace.get("errors") != []:
+    raise SystemExit("gripper observer contains errors")
+if trace.get("source_ref") != expected:
+    raise SystemExit("gripper observer source_ref mismatch")
+if trace.get("gripper_joint_order") != ["gripper_left_joint", "gripper_right_joint"]:
+    raise SystemExit("gripper joint order mismatch")
+if int(trace.get("sample_count", 0)) <= 0:
+    raise SystemExit("gripper observer recorded no complete samples")
+safety = trace.get("safety", {})
+if safety.get("read_only_subscription_only") is not True:
+    raise SystemExit("gripper observer is not read-only")
+for key in (
+    "publisher_created", "service_client_created", "action_client_created",
+    "controller_loaded", "command_sent",
+):
+    if safety.get(key) is not False:
+        raise SystemExit(f"{key} must remain false")
+PY
+
+trap - EXIT INT TERM
