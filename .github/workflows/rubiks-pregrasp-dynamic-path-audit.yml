@@ -4,7 +4,6 @@ on:
   pull_request:
     paths:
       - "bin/audit_rubiks_pregrasp_dynamic_path.py"
-      - "bin/find_rubiks_pregrasp_alignment.py"
       - "bin/capture_gazebo_model_states.py"
       - "bin/run_rubiks_pregrasp_simulation_state.py"
       - "bin/run_gazebo_pregrasp_simulation_state"
@@ -41,7 +40,6 @@ jobs:
           test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
           python3 -m py_compile \
             bin/audit_rubiks_pregrasp_dynamic_path.py \
-            bin/find_rubiks_pregrasp_alignment.py \
             bin/capture_gazebo_model_states.py \
             bin/run_rubiks_pregrasp_simulation_state.py
           bash -n bin/run_gazebo_pregrasp_simulation_state
@@ -50,35 +48,34 @@ jobs:
 
           audit = Path('bin/audit_rubiks_pregrasp_dynamic_path.py').read_text(encoding='utf-8')
           runner = Path('bin/run_gazebo_pregrasp_simulation_state').read_text(encoding='utf-8')
+          telemetry = Path('bin/run_rubiks_pregrasp_simulation_state.py').read_text(encoding='utf-8')
           checker = Path('project/rubiks_self_collision_ws/src/rubiks_self_collision_preflight/src/rubiks_self_collision_preflight.cpp').read_text(encoding='utf-8')
 
           for required in (
-              'PATH_MAX_ABS_RESIDUAL_RAD = 0.02',
-              'joint_state_samples',
-              'wall_time_monotonic',
-              'ros_stamp_monotonic',
-              'max_abs_path_residual_rad',
-              'max_effective_limit_violation_rad',
-              'all_self_collision_free',
-              'new_command_path_added',
-              'same_two_arm_goals_only',
-              'environment_clearance_claimed',
+              'PATH_MAX_ABS_RESIDUAL_RAD = 0.02', 'joint_state_samples',
+              'wall_time_monotonic', 'ros_stamp_monotonic',
+              'max_abs_path_residual_rad', 'max_effective_limit_violation_rad',
+              'all_self_collision_free', 'new_command_path_added',
+              'same_two_arm_goals_only', 'environment_clearance_claimed',
           ):
               if required not in audit:
                   raise SystemExit(f'audit lacks required gate: {required}')
           for required in (
               '/arm_controller/follow_joint_trajectory',
-              'candidate_arm_goal_sent',
-              'return_to_zero_goal_sent',
               '/gripper_controller/gripper_cmd',
               'validate_world_properties',
+              'run_rubiks_pregrasp_simulation_state.py',
           ):
               if required not in runner:
                   raise SystemExit(f'runner lacks required existing boundary: {required}')
-          if runner.count('run_rubiks_pregrasp_simulation_state.py') != 1:
-              raise SystemExit('runner command path count changed')
+          for required in (
+              'candidate_arm_goal_sent', 'return_to_zero_goal_sent',
+              'candidate_goal', 'return_goal', 'joint_state_samples',
+          ):
+              if required not in telemetry:
+                  raise SystemExit(f'telemetry source lacks required two-goal evidence: {required}')
           for forbidden in ('cmd_vel', 'navigate_to_pose'):
-              if forbidden in runner or forbidden in audit:
+              if forbidden in runner or forbidden in telemetry or forbidden in audit:
                   raise SystemExit(f'forbidden command path present: {forbidden}')
           for required in ('checkSelfCollision', 'satisfiesBounds', 'max_contacts_per_pair'):
               if required not in checker:
@@ -105,12 +102,10 @@ jobs:
               source /project/lib_ws/install/setup.bash
               source /root/turtlebot3_ws/install/setup.bash
 
-              bash /root/bin/run_gazebo_pregrasp_simulation_state \
-                /artifacts "${SOURCE_REF}"
+              bash /root/bin/run_gazebo_pregrasp_simulation_state /artifacts "${SOURCE_REF}"
 
               moveit_share="$(ros2 pkg prefix --share turtlebot3_lime_moveit_config)"
-              cp "${moveit_share}/config/turtlebot3_lime.srdf" \
-                /artifacts/turtlebot3_lime.srdf
+              cp "${moveit_share}/config/turtlebot3_lime.srdf" /artifacts/turtlebot3_lime.srdf
 
               python3 /root/bin/audit_rubiks_pregrasp_dynamic_path.py extract \
                 --simulation-summary /artifacts/rubiks_pregrasp_simulation_state_summary.json \
