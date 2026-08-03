@@ -1,0 +1,187 @@
+name: Rubik pregrasp fixture placement offline preflight
+
+on:
+  pull_request:
+    paths:
+      - "bin/prepare_rubiks_pregrasp_fixture_offline.py"
+      - "bin/summarize_rubiks_pregrasp_fixture_offline.py"
+      - "project/rubiks_self_collision_ws/**"
+      - "project/resource/turtlebot3_lime.urdf.xacro"
+      - "doc/rubiks_pregrasp_fixture_placement_offline.md"
+      - "Dockerfile"
+      - ".github/workflows/rubiks-pregrasp-fixture-placement-offline.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: rubiks-pregrasp-fixture-offline-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  fixture-placement-offline-preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      SUPPORTED_ARTIFACT_ID: "8662639552"
+      SUPPORTED_ARTIFACT_SHA256: b5f3bcc6205c57f53e013531d6c5b2bf2bdc0b0e680c664985ea850567bcf1d3
+      PREGRASP_ARTIFACT_ID: "8863801094"
+      PREGRASP_ARTIFACT_SHA256: d2608ae2b8ec2f613810b05f1d48accf4360738fcf49e8bb5e7345ff2fbf80e8
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXACT_HEAD_SHA }}
+
+      - name: Validate exact checkout and offline-only boundary
+        run: |
+          test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
+          python3 -m py_compile \
+            bin/prepare_rubiks_pregrasp_fixture_offline.py \
+            bin/summarize_rubiks_pregrasp_fixture_offline.py
+          python3 - <<'PY'
+          from pathlib import Path
+          prepare = Path('bin/prepare_rubiks_pregrasp_fixture_offline.py').read_text()
+          summary = Path('bin/summarize_rubiks_pregrasp_fixture_offline.py').read_text()
+          checker = Path('project/rubiks_self_collision_ws/src/rubiks_self_collision_preflight/src/rubiks_fixture_placement_offline_preflight.cpp').read_text()
+          for text, label in ((prepare, 'prepare'), (summary, 'summary'), (checker, 'checker')):
+              for forbidden in ('rclpy', 'rclcpp::Node', 'ActionClient', 'create_publisher', 'create_client', 'MoveGroupInterface', 'FollowJointTrajectory', 'GripperCommand'):
+                  if forbidden in text:
+                      raise SystemExit(f'{label} contains runtime path: {forbidden}')
+          for required in ('PR7_SOURCE', 'PR21_SOURCE', 'fixture_anchor_state_index', 'robot_fixture_contact_allowed'):
+              if required not in prepare:
+                  raise SystemExit(f'prepare lacks binding: {required}')
+          for required in ('checkSelfCollision', 'checkCollision', 'rubiks_cube', 'rubiks_support', 'world_link7_anchor'):
+              if required not in checker:
+                  raise SystemExit(f'checker lacks operation: {required}')
+          for required in ('FIXTURE_PLACEMENT_CLEAR', 'BLOCKED_ROBOT_FIXTURE_COLLISION', 'offline_analysis_only'):
+              if required not in summary:
+                  raise SystemExit(f'summary lacks decision boundary: {required}')
+          PY
+
+      - name: Download accepted supported-hold and passive-pregrasp evidence
+        run: |
+          mkdir -p artifacts/supported artifacts/pregrasp
+          curl --fail --location --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${SUPPORTED_ARTIFACT_ID}/zip" \
+            -o artifacts/supported.zip
+          curl --fail --location --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PREGRASP_ARTIFACT_ID}/zip" \
+            -o artifacts/pregrasp.zip
+          printf '%s  %s\n' "${SUPPORTED_ARTIFACT_SHA256}" artifacts/supported.zip | sha256sum --check --strict
+          printf '%s  %s\n' "${PREGRASP_ARTIFACT_SHA256}" artifacts/pregrasp.zip | sha256sum --check --strict
+          unzip -q artifacts/supported.zip -d artifacts/supported
+          unzip -q artifacts/pregrasp.zip -d artifacts/pregrasp
+
+      - name: Build exact-head Lime image
+        run: docker build -t lime-tidyup-fixture-offline:${EXACT_HEAD_SHA} .
+
+      - name: Bind inputs and run offline MoveIt fixture matrix
+        run: |
+          docker run --rm \
+            -e SOURCE_REF="${EXACT_HEAD_SHA}" \
+            -v "$PWD/artifacts:/artifacts" \
+            lime-tidyup-fixture-offline:${EXACT_HEAD_SHA} \
+            bash -lc '
+              set -eo pipefail
+              source /opt/ros/humble/setup.bash
+              source /project/lib_ws/install/setup.bash
+              source /root/turtlebot3_ws/install/setup.bash
+
+              xacro /project/resource/turtlebot3_lime.urdf.xacro use_sim:=true \
+                > /artifacts/turtlebot3_lime_fixture_current.urdf
+              moveit_share="$(ros2 pkg prefix --share turtlebot3_lime_moveit_config)"
+              cp "${moveit_share}/config/turtlebot3_lime.srdf" \
+                /artifacts/turtlebot3_lime_fixture_current.srdf
+
+              python3 /root/bin/prepare_rubiks_pregrasp_fixture_offline.py \
+                --supported-dir /artifacts/supported \
+                --pregrasp-dir /artifacts/pregrasp \
+                --current-urdf /artifacts/turtlebot3_lime_fixture_current.urdf \
+                --current-srdf /artifacts/turtlebot3_lime_fixture_current.srdf \
+                --fixture-tsv /artifacts/rubiks_pregrasp_fixture_contract.tsv \
+                --output /artifacts/rubiks_pregrasp_fixture_input_binding.json \
+                --source-ref "${SOURCE_REF}"
+
+              colcon build \
+                --merge-install \
+                --base-paths /project/rubiks_self_collision_ws/src \
+                --build-base /tmp/rubiks_fixture_build \
+                --install-base /tmp/rubiks_fixture_install \
+                --cmake-args -DCMAKE_BUILD_TYPE=Release \
+                --event-handlers console_direct+
+              source /tmp/rubiks_fixture_install/setup.bash
+
+              /tmp/rubiks_fixture_install/lib/rubiks_self_collision_preflight/rubiks_fixture_placement_offline_preflight \
+                /artifacts/turtlebot3_lime_fixture_current.urdf \
+                /artifacts/turtlebot3_lime_fixture_current.srdf \
+                /artifacts/pregrasp/rubiks_pregrasp_gripper_ground_states.tsv \
+                /artifacts/rubiks_pregrasp_fixture_contract.tsv \
+                /artifacts/rubiks_pregrasp_fixture_collision_results.tsv
+
+              python3 /root/bin/summarize_rubiks_pregrasp_fixture_offline.py \
+                --binding /artifacts/rubiks_pregrasp_fixture_input_binding.json \
+                --results /artifacts/rubiks_pregrasp_fixture_collision_results.tsv \
+                --states /artifacts/pregrasp/rubiks_pregrasp_gripper_ground_states.tsv \
+                --fixture /artifacts/rubiks_pregrasp_fixture_contract.tsv \
+                --urdf /artifacts/turtlebot3_lime_fixture_current.urdf \
+                --srdf /artifacts/turtlebot3_lime_fixture_current.srdf \
+                --output /artifacts/rubiks_pregrasp_fixture_offline_summary.json \
+                --manifest /artifacts/rubiks_pregrasp_fixture_offline_evidence.manifest.json \
+                --source-ref "${SOURCE_REF}"
+            ' >artifacts/fixture_offline.stdout.log \
+              2>artifacts/fixture_offline.stderr.log
+
+      - name: Validate exact-head evidence and decision
+        run: |
+          test -s artifacts/rubiks_pregrasp_fixture_offline_summary.json
+          test -s artifacts/rubiks_pregrasp_fixture_offline_evidence.manifest.json
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          summary = json.loads(Path('artifacts/rubiks_pregrasp_fixture_offline_summary.json').read_text())
+          manifest = json.loads(Path('artifacts/rubiks_pregrasp_fixture_offline_evidence.manifest.json').read_text())
+          def require(ok, message):
+              if not ok: raise SystemExit(message)
+          require(summary.get('audit_passed') is True and summary.get('errors') == [], 'evidence audit failed')
+          require(summary.get('source_ref') == os.environ['EXACT_HEAD_SHA'], 'summary source mismatch')
+          require(summary.get('exact_head_bound') is True, 'exact-head flag missing')
+          decision = summary.get('decision')
+          require(decision in ('FIXTURE_PLACEMENT_CLEAR', 'BLOCKED_ROBOT_FIXTURE_COLLISION'), 'unexpected decision')
+          audit = summary.get('moveit_audit', {})
+          require(audit.get('state_count', 0) >= 100, 'state matrix too small')
+          require(audit.get('all_bounds_ok') is True, 'bounds regression')
+          require(audit.get('all_self_collision_free') is True, 'self-collision regression')
+          if decision == 'FIXTURE_PLACEMENT_CLEAR':
+              require(summary.get('fixture_phase_ready') is True, 'clear decision not ready')
+              require(audit.get('all_cube_clear') is True and audit.get('all_support_clear') is True, 'clear decision has contacts')
+          else:
+              require(summary.get('fixture_phase_ready') is False, 'blocked decision marked ready')
+              require(audit.get('cube_collision_state_count', 0) + audit.get('support_collision_state_count', 0) > 0, 'blocked decision lacks contact evidence')
+          safety = summary.get('safety', {})
+          require(safety.get('offline_analysis_only') is True, 'offline boundary missing')
+          for key in ('gazebo_started','ros_node_created','object_spawned','controller_loaded','planning_request_created','trajectory_instantiated','arm_command_sent','gripper_command_sent','attachment_used','physical_hardware_used','production_runtime_modified'):
+              require(safety.get(key) is False, f'{key} must remain false')
+          require(manifest.get('source_ref') == os.environ['EXACT_HEAD_SHA'], 'manifest source mismatch')
+          require(manifest.get('decision') == decision, 'manifest decision mismatch')
+          require(manifest.get('state_count') == audit.get('state_count'), 'manifest state count mismatch')
+          print(json.dumps(summary, indent=2, sort_keys=True))
+          PY
+
+      - name: Upload offline fixture evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-pregrasp-fixture-placement-offline-evidence
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
