@@ -231,6 +231,7 @@ int main(int argc, char** argv)
            << join(active_joints, ",") << "\t" << join(audited_links, ",") << "\t"
            << join(missing_geometry, ",") << "\t" << srdf_model->getDisabledCollisionPairs().size() << "\t"
            << allowed_ground_link_count << "\n";
+    output.flush();
 
     collision_detection::CollisionRequest self_request;
     self_request.contacts = true;
@@ -239,11 +240,14 @@ int main(int argc, char** argv)
 
     collision_detection::CollisionRequest ground_request;
     ground_request.contacts = true;
-    ground_request.distance = true;
+    // FCL's Humble plane-distance path is not needed for this contact-only gate.
+    // Requesting distance for an infinite plane can crash before producing evidence.
+    ground_request.distance = false;
     ground_request.max_contacts = 1000;
     ground_request.max_contacts_per_pair = 100;
 
     output << std::setprecision(17);
+    std::size_t state_index = 0;
     for (const auto& audit : states)
     {
       moveit::core::RobotState state(robot_model);
@@ -268,14 +272,17 @@ int main(int argc, char** argv)
       collision_detection::CollisionResult ground_result;
       scene.checkCollision(ground_request, ground_result, state, ground_acm);
       const auto ground_pairs = contact_pairs(ground_result);
-      const bool distance_finite = std::isfinite(ground_result.distance);
 
       output << "STATE\t" << audit.label << "\t" << (bounds_ok ? "true" : "false") << "\t"
              << (self_result.collision ? "true" : "false") << "\t"
              << (ground_result.collision ? "true" : "false") << "\t"
              << ground_pairs.size() << "\t" << join_set(ground_pairs, ",") << "\t"
-             << self_pairs.size() << "\t" << join_set(self_pairs, ",") << "\t"
-             << (distance_finite ? std::to_string(ground_result.distance) : "NA") << "\n";
+             << self_pairs.size() << "\t" << join_set(self_pairs, ",") << "\tNA\n";
+      ++state_index;
+      if (state_index == 1 || state_index % 100 == 0)
+      {
+        output.flush();
+      }
     }
     return 0;
   }
