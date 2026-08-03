@@ -50,6 +50,13 @@ ros2_action_available() {
   [[ "${padded}" == *$'\n'"$1"$'\n'* ]]
 }
 
+write_controller_snapshot() {
+  local output_file="$1"
+  ros2 control list_controllers | python3 -c \
+    'import re, sys; sys.stdout.write(re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", sys.stdin.read()))' \
+    >"${output_file}"
+}
+
 validate_world_properties() {
   local output_file="$1"
   local stem="${output_file%.json}"
@@ -178,7 +185,7 @@ if ros2_action_available '/gripper_controller/gripper_cmd'; then
   exit 6
 fi
 
-ros2 control list_controllers >"${ARTIFACT_DIR}/pregrasp_controllers_before.txt"
+write_controller_snapshot "${ARTIFACT_DIR}/pregrasp_controllers_before.txt"
 grep -q '^arm_controller.*active' "${ARTIFACT_DIR}/pregrasp_controllers_before.txt"
 grep -q '^joint_state_broadcaster.*active' "${ARTIFACT_DIR}/pregrasp_controllers_before.txt"
 if grep -Eq 'gripper|wheel|diff_drive|base_controller' "${ARTIFACT_DIR}/pregrasp_controllers_before.txt"; then
@@ -201,7 +208,7 @@ python3 /root/bin/run_rubiks_pregrasp_simulation_state.py \
 TRIAL_STATUS=$?
 set -e
 
-ros2 control list_controllers >"${ARTIFACT_DIR}/pregrasp_controllers_after.txt" || true
+write_controller_snapshot "${ARTIFACT_DIR}/pregrasp_controllers_after.txt" || true
 ros2 action list >"${ARTIFACT_DIR}/pregrasp_actions_after.txt" 2>&1 || true
 validate_world_properties "${ARTIFACT_DIR}/pregrasp_world_models_after.json"
 
