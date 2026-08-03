@@ -27,8 +27,13 @@ if source.count(before_anchor) != 1:
     raise SystemExit("base runner lacks unique pre-trial world-state anchor")
 observer_start = r'''GROUND_FRAME_TRACE="${ARTIFACT_DIR}/rubiks_pregrasp_ground_frame_trace.json"
 GROUND_FRAME_READY="${ARTIFACT_DIR}/rubiks_pregrasp_ground_frame.ready"
+GROUND_FRAME_OBSERVER_SCRIPT="${RUBIK_GROUND_FRAME_OBSERVER_SCRIPT:-/root/bin/observe_rubiks_ground_frames.py}"
+[[ -f "${GROUND_FRAME_OBSERVER_SCRIPT}" ]] || {
+  echo "ground-frame observer script is missing: ${GROUND_FRAME_OBSERVER_SCRIPT}" >&2
+  exit 10
+}
 rm -f "${GROUND_FRAME_TRACE}" "${GROUND_FRAME_READY}"
-python3 /root/bin/observe_rubiks_ground_frames.py \
+python3 "${GROUND_FRAME_OBSERVER_SCRIPT}" \
   --model "${MODEL_NAME}" \
   --urdf "${MOTION_URDF}" \
   --output "${GROUND_FRAME_TRACE}" \
