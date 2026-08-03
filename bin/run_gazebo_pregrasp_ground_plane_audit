@@ -3,7 +3,7 @@ set -euo pipefail
 
 ARTIFACT_DIR="${1:-/artifacts}"
 SOURCE_REF="${2:-unknown}"
-BASE_RUNNER="/root/bin/run_gazebo_pregrasp_simulation_state"
+BASE_RUNNER="${RUBIK_GROUND_PLANE_BASE_RUNNER:-/root/bin/run_gazebo_pregrasp_simulation_state}"
 PATCHED_RUNNER="$(mktemp /tmp/rubiks-ground-plane-runner.XXXXXX)"
 trap 'rm -f "${PATCHED_RUNNER}"' EXIT
 
@@ -83,4 +83,9 @@ output.write_text(source, encoding="utf-8")
 PY
 
 chmod +x "${PATCHED_RUNNER}"
+if [[ "${RUBIK_GROUND_PLANE_RENDER_ONLY:-0}" == "1" ]]; then
+  output="${RUBIK_GROUND_PLANE_RENDER_OUTPUT:?render output path is required}"
+  cp "${PATCHED_RUNNER}" "${output}"
+  exit 0
+fi
 bash "${PATCHED_RUNNER}" "${ARTIFACT_DIR}" "${SOURCE_REF}"
