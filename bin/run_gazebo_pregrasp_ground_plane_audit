@@ -30,6 +30,7 @@ GROUND_FRAME_READY="${ARTIFACT_DIR}/rubiks_pregrasp_ground_frame.ready"
 rm -f "${GROUND_FRAME_TRACE}" "${GROUND_FRAME_READY}"
 python3 /root/bin/observe_rubiks_ground_frames.py \
   --model "${MODEL_NAME}" \
+  --urdf "${MOTION_URDF}" \
   --output "${GROUND_FRAME_TRACE}" \
   --ready-file "${GROUND_FRAME_READY}" \
   --source-ref "${SOURCE_REF}" \
