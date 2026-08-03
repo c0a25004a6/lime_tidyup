@@ -8,18 +8,60 @@ GRIPPER_TRACE="${ARTIFACT_DIR}/rubiks_pregrasp_gripper_state_trace.json"
 GRIPPER_STDOUT="${ARTIFACT_DIR}/rubiks_pregrasp_gripper_state.stdout.log"
 GRIPPER_STDERR="${ARTIFACT_DIR}/rubiks_pregrasp_gripper_state.stderr.log"
 GRIPPER_EXIT_STATUS="${ARTIFACT_DIR}/rubiks_pregrasp_gripper_state.exit_status.txt"
+HARDWARE_INTERFACES="${ARTIFACT_DIR}/pregrasp_hardware_interfaces.txt"
+HARDWARE_COMPONENTS="${ARTIFACT_DIR}/pregrasp_hardware_components.txt"
+TOPIC_TYPES="${ARTIFACT_DIR}/pregrasp_topic_types.txt"
+BROADCASTER_PARAMETERS="${ARTIFACT_DIR}/pregrasp_joint_state_broadcaster_parameters.txt"
+INVENTORY_STATUS="${ARTIFACT_DIR}/pregrasp_read_only_inventory_status.txt"
 mkdir -p "${ARTIFACT_DIR}"
-rm -f "${GRIPPER_TRACE}" "${GRIPPER_STDOUT}" "${GRIPPER_STDERR}" "${GRIPPER_EXIT_STATUS}"
+rm -f \
+  "${GRIPPER_TRACE}" "${GRIPPER_STDOUT}" "${GRIPPER_STDERR}" \
+  "${GRIPPER_EXIT_STATUS}" "${HARDWARE_INTERFACES}" "${HARDWARE_COMPONENTS}" \
+  "${TOPIC_TYPES}" "${BROADCASTER_PARAMETERS}" "${INVENTORY_STATUS}"
 
 cleanup() {
   status=$?
-  if [[ -n "${GRIPPER_OBSERVER_PID:-}" ]] && kill -0 "${GRIPPER_OBSERVER_PID}" 2>/dev/null; then
-    kill -INT "${GRIPPER_OBSERVER_PID}" 2>/dev/null || true
-    wait "${GRIPPER_OBSERVER_PID}" 2>/dev/null || true
-  fi
+  for pid in "${GRIPPER_OBSERVER_PID:-}" "${INVENTORY_PID:-}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+      kill -INT "${pid}" 2>/dev/null || true
+      wait "${pid}" 2>/dev/null || true
+    fi
+  done
   exit "${status}"
 }
 trap cleanup EXIT INT TERM
+
+capture_read_only_inventory() {
+  set +e
+  service_ready=0
+  for _ in $(seq 1 180); do
+    service_type="$(timeout 3 ros2 service type /controller_manager/list_hardware_interfaces 2>/dev/null)"
+    if [[ -n "${service_type}" ]]; then
+      service_ready=1
+      break
+    fi
+    sleep 0.5
+  done
+  printf 'controller_manager_service_ready=%s\n' "${service_ready}" >"${INVENTORY_STATUS}"
+  if [[ ${service_ready} -eq 1 ]]; then
+    timeout 15 ros2 control list_hardware_interfaces >"${HARDWARE_INTERFACES}" 2>&1
+    printf 'list_hardware_interfaces_status=%s\n' "$?" >>"${INVENTORY_STATUS}"
+    timeout 15 ros2 control list_hardware_components -v >"${HARDWARE_COMPONENTS}" 2>&1
+    printf 'list_hardware_components_status=%s\n' "$?" >>"${INVENTORY_STATUS}"
+    timeout 15 ros2 topic list -t >"${TOPIC_TYPES}" 2>&1
+    printf 'topic_list_status=%s\n' "$?" >>"${INVENTORY_STATUS}"
+    {
+      printf '%s\n' 'publish_dynamic_joint_states:'
+      timeout 10 ros2 param get /joint_state_broadcaster publish_dynamic_joint_states
+      printf '%s\n' 'joints:'
+      timeout 10 ros2 param get /joint_state_broadcaster joints
+      printf '%s\n' 'interfaces:'
+      timeout 10 ros2 param get /joint_state_broadcaster interfaces
+    } >"${BROADCASTER_PARAMETERS}" 2>&1
+    printf 'broadcaster_parameter_status=%s\n' "$?" >>"${INVENTORY_STATUS}"
+  fi
+  exit 0
+}
 
 python3 /root/bin/observe_rubiks_gripper_states.py \
   --output "${GRIPPER_TRACE}" \
@@ -27,6 +69,10 @@ python3 /root/bin/observe_rubiks_gripper_states.py \
   >"${GRIPPER_STDOUT}" \
   2>"${GRIPPER_STDERR}" &
 GRIPPER_OBSERVER_PID=$!
+
+capture_read_only_inventory &
+INVENTORY_PID=$!
+
 sleep 0.2
 kill -0 "${GRIPPER_OBSERVER_PID}" 2>/dev/null || {
   cat "${GRIPPER_STDERR}" >&2 || true
@@ -34,6 +80,13 @@ kill -0 "${GRIPPER_OBSERVER_PID}" 2>/dev/null || {
 }
 
 bash "${BASE_GROUND_RUNNER}" "${ARTIFACT_DIR}" "${SOURCE_REF}"
+
+set +e
+wait "${INVENTORY_PID}"
+inventory_status=$?
+set -e
+printf 'inventory_process_status=%s\n' "${inventory_status}" >>"${INVENTORY_STATUS}"
+unset INVENTORY_PID
 
 kill -INT "${GRIPPER_OBSERVER_PID}" 2>/dev/null || true
 set +e
@@ -55,7 +108,13 @@ from pathlib import Path
 trace = json.loads(Path(sys.argv[1]).read_text())
 expected = sys.argv[2]
 if trace.get("passed") is not True:
-    raise SystemExit(trace.get("errors"))
+    raise SystemExit(
+        "no complete passive gripper samples; "
+        f"joint_seen={trace.get('joint_state_messages_seen')}, "
+        f"dynamic_seen={trace.get('dynamic_messages_seen')}, "
+        f"dynamic_joints={trace.get('dynamic_joint_names')}, "
+        f"dynamic_interfaces={trace.get('dynamic_interface_inventory')}"
+    )
 if trace.get("errors") != []:
     raise SystemExit("gripper observer contains errors")
 if trace.get("source_ref") != expected:
@@ -64,6 +123,10 @@ if trace.get("gripper_joint_order") != ["gripper_left_joint", "gripper_right_joi
     raise SystemExit("gripper joint order mismatch")
 if int(trace.get("sample_count", 0)) <= 0:
     raise SystemExit("gripper observer recorded no complete samples")
+if int(trace.get("sample_source_counts", {}).get("/dynamic_joint_states", 0)) <= 0 and int(
+    trace.get("sample_source_counts", {}).get("/joint_states", 0)
+) <= 0:
+    raise SystemExit("no accepted passive state source")
 safety = trace.get("safety", {})
 if safety.get("read_only_subscription_only") is not True:
     raise SystemExit("gripper observer is not read-only")
