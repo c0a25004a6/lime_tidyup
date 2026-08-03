@@ -79,7 +79,8 @@ kill -0 "${GRIPPER_OBSERVER_PID}" 2>/dev/null || {
   exit 20
 }
 
-bash "${BASE_GROUND_RUNNER}" "${ARTIFACT_DIR}" "${SOURCE_REF}"
+RUBIK_GROUND_FRAME_OBSERVER_SCRIPT=/root/bin/observe_rubiks_ground_frames_reliable.py \
+  bash "${BASE_GROUND_RUNNER}" "${ARTIFACT_DIR}" "${SOURCE_REF}"
 
 set +e
 wait "${INVENTORY_PID}"
@@ -121,6 +122,10 @@ if trace.get("source_ref") != expected:
     raise SystemExit("gripper observer source_ref mismatch")
 if trace.get("gripper_joint_order") != ["gripper_left_joint", "gripper_right_joint"]:
     raise SystemExit("gripper joint order mismatch")
+if trace.get("observed_gripper_source_joint_name_sets") != [
+    ["gripper_left_joint", "gripper_right_joint_mimic"]
+]:
+    raise SystemExit("unexpected passive gripper source alias set")
 if int(trace.get("sample_count", 0)) <= 0:
     raise SystemExit("gripper observer recorded no complete samples")
 if int(trace.get("sample_source_counts", {}).get("/dynamic_joint_states", 0)) <= 0 and int(
