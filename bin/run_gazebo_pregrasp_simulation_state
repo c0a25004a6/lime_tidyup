@@ -52,12 +52,53 @@ ros2_action_available() {
 
 validate_world_properties() {
   local output_file="$1"
+  local stem="${output_file%.json}"
+  local stdout_file="${stem}.stdout.log"
+  local stderr_file="${stem}.stderr.log"
+  local capture_status
+
+  set +e
   python3 /root/bin/capture_gazebo_model_states.py \
     --expected-model ground_plane \
     --expected-model "${MODEL_NAME}" \
     --output "${output_file}" \
     --graph-timeout 10.0 \
-    --message-timeout 10.0
+    --message-timeout 10.0 \
+    >"${stdout_file}" 2>"${stderr_file}"
+  capture_status=$?
+  set -e
+
+  if (( capture_status != 0 )); then
+    if [[ ! -s "${output_file}" ]]; then
+      python3 - "${output_file}" "${capture_status}" "${stdout_file}" "${stderr_file}" \
+        ground_plane "${MODEL_NAME}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+output = Path(sys.argv[1])
+status = int(sys.argv[2])
+stdout_path = Path(sys.argv[3])
+stderr_path = Path(sys.argv[4])
+expected_models = sorted(sys.argv[5:])
+payload = {
+    "schema_version": 3,
+    "status": "error",
+    "phase": "python_startup",
+    "expected_models": expected_models,
+    "capture_exit_code": status,
+    "stdout_path": stdout_path.name,
+    "stderr_path": stderr_path.name,
+    "stdout": stdout_path.read_text(encoding="utf-8", errors="replace") if stdout_path.exists() else "",
+    "stderr": stderr_path.read_text(encoding="utf-8", errors="replace") if stderr_path.exists() else "",
+}
+output.parent.mkdir(parents=True, exist_ok=True)
+output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+    fi
+    cat "${stderr_file}" >&2 || true
+    return "${capture_status}"
+  fi
 }
 
 xacro /project/resource/turtlebot3_lime.urdf.xacro use_sim:=true >"${PRODUCTION_URDF}"
