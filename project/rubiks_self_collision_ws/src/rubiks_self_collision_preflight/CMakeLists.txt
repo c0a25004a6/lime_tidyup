@@ -36,9 +36,24 @@ ament_target_dependencies(
   urdf
 )
 
+add_executable(
+  rubiks_gripper_ground_clearance_preflight
+  src/rubiks_gripper_ground_clearance_preflight.cpp
+)
+target_compile_features(rubiks_gripper_ground_clearance_preflight PUBLIC cxx_std_17)
+ament_target_dependencies(
+  rubiks_gripper_ground_clearance_preflight
+  geometric_shapes
+  moveit_core
+  moveit_ros_planning
+  srdfdom
+  urdf
+)
+
 install(TARGETS
   rubiks_self_collision_preflight
   rubiks_ground_plane_clearance_preflight
+  rubiks_gripper_ground_clearance_preflight
   DESTINATION lib/${PROJECT_NAME}
 )
 
