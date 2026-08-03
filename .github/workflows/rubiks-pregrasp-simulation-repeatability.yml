@@ -73,11 +73,12 @@ jobs:
               'write_controller_snapshot',
               '/arm_controller/follow_joint_trajectory',
               '/gripper_controller/gripper_cmd',
+              'IFRA_LinkAttacher',
               'run_rubiks_pregrasp_simulation_state.py',
           ):
               if required not in runner:
                   raise SystemExit(f'base runner lacks required boundary: {required}')
-          for forbidden in ('cmd_vel', 'navigate_to_pose', 'IFRA_LinkAttacher'):
+          for forbidden in ('cmd_vel', 'navigate_to_pose'):
               if forbidden in runner:
                   raise SystemExit(f'base runner contains forbidden command path: {forbidden}')
           if workflow.count('docker run --rm') != 1:
