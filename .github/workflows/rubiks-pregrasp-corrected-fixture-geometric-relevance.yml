@@ -73,7 +73,7 @@ jobs:
                   raise SystemExit(f'provenance lacks source binding: {required}')
           for required in (
               'getShapeExtentsAtOrigin', 'getCenteredBoundingBoxOffset',
-              'simultaneous_side_plane_reachability',
+              'representative_reaches',
               'CORRECTED_FIXTURE_GEOMETRICALLY_RELEVANT',
               'BLOCKED_CORRECTED_FIXTURE_OUTSIDE_FINGER_REACH_ENVELOPE',
           ):
