@@ -63,10 +63,6 @@ jobs:
                   if forbidden in text:
                       raise SystemExit(f'{label} contains runtime path: {forbidden}')
 
-          allowed_audit_imports = {
-              '__future__', 'argparse', 'math', 'struct', 'dataclasses',
-              'pathlib', 'xml',
-          }
           tree = ast.parse(texts['audit'])
           imported = set()
           for node in ast.walk(tree):
@@ -74,41 +70,40 @@ jobs:
                   imported.update(alias.name.split('.')[0] for alias in node.names)
               elif isinstance(node, ast.ImportFrom) and node.module:
                   imported.add(node.module.split('.')[0])
-          unexpected = imported - allowed_audit_imports
+          allowed = {'__future__', 'argparse', 'math', 'struct', 'dataclasses', 'pathlib', 'xml'}
+          unexpected = imported - allowed
           if unexpected:
               raise SystemExit(f'audit contains non-standard imports: {sorted(unexpected)}')
 
-          for required in (
-              'PR23_SOURCE', 'EXPECTED_TRANSLATION',
-              'translation_within_cube_half_extent_box',
-              'collision_mesh_aabb_envelopes_only',
-          ):
-              if required not in texts['prepare']:
-                  raise SystemExit(f'prepare lacks accepted correction binding: {required}')
-          for required in (
-              'source_repository', 'sha256', 'gripper_left_link',
-              'gripper_right_link', 'read_only_filesystem_inspection',
-          ):
-              if required not in texts['provenance']:
-                  raise SystemExit(f'provenance lacks source binding: {required}')
-          for required in (
-              'stl_vertices', 'struct.unpack_from', 'triangle_count',
-              'vertex_count', 'EXPECTED_PACKAGE', 'positive_xz',
-              'CORRECTED_FIXTURE_GEOMETRICALLY_RELEVANT',
-              'BLOCKED_CORRECTED_FIXTURE_OUTSIDE_FINGER_REACH_ENVELOPE',
-          ):
-              if required not in texts['audit']:
-                  raise SystemExit(f'audit lacks exact-STL operation: {required}')
-          for required in (
-              'stl_geometry', 'exact_urdf_referenced_stl_vertices_used',
-              'collision_mesh_aabb_envelopes_only',
-              'exact_mesh_surface_contact_claimed',
-              'force_closure_claimed', 'grasp_success_claimed',
-              'RUBIK-PREGRASP-CORRECTED-FIXTURE-OFFLINE-GRIPPER-SWEEP-COLLISION-PREFLIGHT',
-              'RUBIK-PREGRASP-GRASP-RELEVANCE-CONSTRAINED-FIXTURE-SEARCH',
-          ):
-              if required not in texts['summary']:
-                  raise SystemExit(f'summary lacks claim/decision boundary: {required}')
+          requirements = {
+              'prepare': (
+                  'PR23_SOURCE', 'EXPECTED_TRANSLATION',
+                  'translation_within_cube_half_extent_box',
+                  'collision_mesh_aabb_envelopes_only',
+              ),
+              'provenance': (
+                  'source_repository', 'sha256', 'gripper_left_link',
+                  'gripper_right_link', 'read_only_filesystem_inspection',
+              ),
+              'audit': (
+                  'stl_vertices', 'struct.unpack_from', 'triangle_count',
+                  'vertex_count', 'EXPECTED_PACKAGE', 'positive_xz',
+                  'CORRECTED_FIXTURE_GEOMETRICALLY_RELEVANT',
+                  'BLOCKED_CORRECTED_FIXTURE_OUTSIDE_FINGER_REACH_ENVELOPE',
+              ),
+              'summary': (
+                  'stl_geometry', 'exact_urdf_referenced_stl_vertices_used',
+                  'collision_mesh_aabb_envelopes_only',
+                  'exact_mesh_surface_contact_claimed',
+                  'force_closure_claimed', 'grasp_success_claimed',
+                  'RUBIK-PREGRASP-CORRECTED-FIXTURE-OFFLINE-GRIPPER-SWEEP-COLLISION-PREFLIGHT',
+                  'RUBIK-PREGRASP-GRASP-RELEVANCE-CONSTRAINED-FIXTURE-SEARCH',
+              ),
+          }
+          for label, tokens in requirements.items():
+              for token in tokens:
+                  if token not in texts[label]:
+                      raise SystemExit(f'{label} lacks required contract token: {token}')
 
           obsolete = Path('project/rubiks_self_collision_ws/src/rubiks_self_collision_preflight/src/rubiks_corrected_fixture_geometric_relevance_preflight.cpp')
           if obsolete.exists():
@@ -116,10 +111,6 @@ jobs:
           cmake = Path('project/rubiks_self_collision_ws/src/rubiks_self_collision_preflight/CMakeLists.txt').read_text()
           if 'rubiks_corrected_fixture_geometric_relevance_preflight' in cmake:
               raise SystemExit('obsolete relevance target remains in CMake')
-          workflow = Path('.github/workflows/rubiks-pregrasp-corrected-fixture-geometric-relevance.yml').read_text()
-          for forbidden in ('docker build', 'docker run', 'colcon build'):
-              if forbidden in workflow:
-                  raise SystemExit(f'workflow retains heavy/runtime path: {forbidden}')
           PY
 
       - name: Download accepted PR23 correction evidence
