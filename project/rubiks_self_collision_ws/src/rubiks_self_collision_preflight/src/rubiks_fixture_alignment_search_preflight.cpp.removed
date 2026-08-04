@@ -1,0 +1,3 @@
+The obsolete combined-object fixture alignment checker was removed.
+The reviewed build target uses rubiks_fixture_alignment_search_preflight_v2.cpp,
+which reproduces PR #22 by checking cube and support in separate planning-scene queries.
