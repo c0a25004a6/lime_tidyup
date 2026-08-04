@@ -44,7 +44,8 @@ jobs:
 
           prepare = Path('bin/prepare_rubiks_pregrasp_fixture_alignment_search.py').read_text()
           summary = Path('bin/summarize_rubiks_pregrasp_fixture_alignment_search.py').read_text()
-          checker = Path('project/rubiks_self_collision_ws/src/rubiks_self_collision_preflight/src/rubiks_fixture_alignment_search_preflight.cpp').read_text()
+          checker_path = Path('project/rubiks_self_collision_ws/src/rubiks_self_collision_preflight/src/rubiks_fixture_alignment_search_preflight_v2.cpp')
+          checker = checker_path.read_text()
           cmake = Path('project/rubiks_self_collision_ws/src/rubiks_self_collision_preflight/CMakeLists.txt').read_text()
 
           for text, label in ((prepare, 'prepare'), (summary, 'summary'), (checker, 'checker')):
@@ -65,7 +66,9 @@ jobs:
           for required in (
               'COARSE_STEP_M = 0.002', 'COARSE_RADIUS_STEPS = 40',
               'FINE_STEP_M = 0.00025', 'FINE_RADIUS_STEPS = 8',
-              'evaluate_translation', 'FULL_PATH_CLEAR_TRANSLATION_FOUND',
+              'evaluate_translation', 'check_single_object',
+              'baseline did not reproduce accepted PR22 fixture blocker',
+              'FULL_PATH_CLEAR_TRANSLATION_FOUND',
               'NO_FULL_PATH_CLEAR_TRANSLATION_WITHIN_COARSE_RADIUS',
               'rubiks_cube', 'rubiks_support', 'checkCollision',
           ):
@@ -80,8 +83,11 @@ jobs:
           ):
               if required not in summary:
                   raise SystemExit(f'summary lacks claim boundary: {required}')
-          if 'rubiks_fixture_alignment_search_preflight' not in cmake:
-              raise SystemExit('alignment search target is not installed')
+          expected_source = 'src/rubiks_fixture_alignment_search_preflight_v2.cpp'
+          if expected_source not in cmake:
+              raise SystemExit('alignment search target does not use the reviewed checker')
+          if 'src/rubiks_fixture_alignment_search_preflight.cpp' in cmake:
+              raise SystemExit('obsolete alignment checker remains in the build target')
           PY
 
       - name: Download accepted PR22 fixture evidence
