@@ -1,0 +1,231 @@
+name: Rubik corrected fixture geometric relevance
+
+on:
+  pull_request:
+    paths:
+      - "bin/prepare_rubiks_pregrasp_corrected_fixture_relevance.py"
+      - "bin/capture_rubiks_gripper_mesh_provenance.py"
+      - "bin/summarize_rubiks_pregrasp_corrected_fixture_relevance.py"
+      - "project/rubiks_self_collision_ws/**"
+      - "doc/rubiks_pregrasp_corrected_fixture_geometric_relevance.md"
+      - "Dockerfile"
+      - ".github/workflows/rubiks-pregrasp-corrected-fixture-geometric-relevance.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: rubiks-corrected-fixture-geometric-relevance-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  command-free-geometric-relevance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      ACCEPTED_ARTIFACT_ID: "8890739787"
+      ACCEPTED_ARTIFACT_SHA256: 9a56dea2d3384feec3622e60f733bf13d8798da768447fc9a33e18ed3ba7fa76
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXACT_HEAD_SHA }}
+
+      - name: Validate exact checkout and command-free boundary
+        run: |
+          test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
+          python3 -m py_compile \
+            bin/prepare_rubiks_pregrasp_corrected_fixture_relevance.py \
+            bin/capture_rubiks_gripper_mesh_provenance.py \
+            bin/summarize_rubiks_pregrasp_corrected_fixture_relevance.py
+          python3 - <<'PY'
+          from pathlib import Path
+
+          prepare = Path('bin/prepare_rubiks_pregrasp_corrected_fixture_relevance.py').read_text()
+          provenance = Path('bin/capture_rubiks_gripper_mesh_provenance.py').read_text()
+          summary = Path('bin/summarize_rubiks_pregrasp_corrected_fixture_relevance.py').read_text()
+          checker = Path('project/rubiks_self_collision_ws/src/rubiks_self_collision_preflight/src/rubiks_corrected_fixture_geometric_relevance_preflight.cpp').read_text()
+          cmake = Path('project/rubiks_self_collision_ws/src/rubiks_self_collision_preflight/CMakeLists.txt').read_text()
+
+          for text, label in ((prepare, 'prepare'), (provenance, 'provenance'), (summary, 'summary'), (checker, 'checker')):
+              for forbidden in (
+                  'rclpy', 'rclcpp::Node', 'ActionClient', 'create_publisher',
+                  'create_client', 'MoveGroupInterface', 'FollowJointTrajectory',
+                  'GripperCommand', 'spawn_entity', 'checkCollision',
+              ):
+                  if forbidden in text:
+                      raise SystemExit(f'{label} contains runtime/collision path: {forbidden}')
+          for required in (
+              'PR23_SOURCE', 'EXPECTED_TRANSLATION',
+              'translation_within_cube_half_extent_box',
+              'collision_mesh_aabb_envelopes_only',
+          ):
+              if required not in prepare:
+                  raise SystemExit(f'prepare lacks accepted correction binding: {required}')
+          for required in (
+              'source_repository', 'sha256', 'gripper_left_link',
+              'gripper_right_link', 'read_only_filesystem_inspection',
+          ):
+              if required not in provenance:
+                  raise SystemExit(f'provenance lacks source binding: {required}')
+          for required in (
+              'getShapeExtentsAtOrigin', 'getCenteredBoundingBoxOffset',
+              'simultaneous_side_plane_reachability',
+              'CORRECTED_FIXTURE_GEOMETRICALLY_RELEVANT',
+              'BLOCKED_CORRECTED_FIXTURE_OUTSIDE_FINGER_REACH_ENVELOPE',
+          ):
+              if required not in checker:
+                  raise SystemExit(f'checker lacks geometric operation: {required}')
+          for required in (
+              'collision_mesh_aabb_envelopes_only',
+              'exact_mesh_surface_contact_claimed',
+              'force_closure_claimed', 'grasp_success_claimed',
+              'RUBIK-PREGRASP-CORRECTED-FIXTURE-OFFLINE-GRIPPER-SWEEP-COLLISION-PREFLIGHT',
+              'RUBIK-PREGRASP-GRASP-RELEVANCE-CONSTRAINED-FIXTURE-SEARCH',
+          ):
+              if required not in summary:
+                  raise SystemExit(f'summary lacks claim/decision boundary: {required}')
+          if 'rubiks_corrected_fixture_geometric_relevance_preflight' not in cmake:
+              raise SystemExit('geometric relevance target is not installed')
+          PY
+
+      - name: Download accepted PR23 correction evidence
+        run: |
+          mkdir -p artifacts/accepted
+          curl --fail --location --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ACCEPTED_ARTIFACT_ID}/zip" \
+            -o artifacts/accepted.zip
+          printf '%s  %s\n' "${ACCEPTED_ARTIFACT_SHA256}" artifacts/accepted.zip | sha256sum --check --strict
+          unzip -q artifacts/accepted.zip -d artifacts/accepted
+
+      - name: Build exact-head Lime image
+        run: docker build -t lime-tidyup-corrected-fixture-relevance:${EXACT_HEAD_SHA} .
+
+      - name: Run command-free mesh-envelope relevance preflight
+        run: |
+          docker run --rm \
+            -e SOURCE_REF="${EXACT_HEAD_SHA}" \
+            -v "$PWD/artifacts:/artifacts" \
+            lime-tidyup-corrected-fixture-relevance:${EXACT_HEAD_SHA} \
+            bash -lc '
+              set -eo pipefail
+              source /opt/ros/humble/setup.bash
+              source /project/lib_ws/install/setup.bash
+              source /root/turtlebot3_ws/install/setup.bash
+
+              python3 /root/bin/prepare_rubiks_pregrasp_corrected_fixture_relevance.py \
+                --accepted-dir /artifacts/accepted \
+                --contract-tsv /artifacts/rubiks_pregrasp_corrected_fixture_relevance_contract.tsv \
+                --output /artifacts/rubiks_pregrasp_corrected_fixture_relevance_input_binding.json \
+                --source-ref "${SOURCE_REF}"
+
+              python3 /root/bin/capture_rubiks_gripper_mesh_provenance.py \
+                --urdf /artifacts/accepted/accepted/turtlebot3_lime_fixture_current.urdf \
+                --package-share /root/turtlebot3_ws/install/turtlebot3_lime_description/share/turtlebot3_lime_description \
+                --source-repo /root/turtlebot3_ws/turtlebot3_lime \
+                --output /artifacts/rubiks_pregrasp_corrected_fixture_mesh_provenance.json \
+                --source-ref "${SOURCE_REF}"
+
+              colcon build \
+                --merge-install \
+                --base-paths /project/rubiks_self_collision_ws/src \
+                --build-base /tmp/rubiks_corrected_fixture_relevance_build \
+                --install-base /tmp/rubiks_corrected_fixture_relevance_install \
+                --cmake-args -DCMAKE_BUILD_TYPE=Release \
+                --event-handlers console_direct+
+              source /tmp/rubiks_corrected_fixture_relevance_install/setup.bash
+
+              /tmp/rubiks_corrected_fixture_relevance_install/lib/rubiks_self_collision_preflight/rubiks_corrected_fixture_geometric_relevance_preflight \
+                /artifacts/accepted/accepted/turtlebot3_lime_fixture_current.urdf \
+                /artifacts/accepted/accepted/turtlebot3_lime_fixture_current.srdf \
+                /artifacts/rubiks_pregrasp_corrected_fixture_relevance_contract.tsv \
+                /artifacts/rubiks_pregrasp_corrected_fixture_relevance_results.tsv
+
+              python3 /root/bin/summarize_rubiks_pregrasp_corrected_fixture_relevance.py \
+                --binding /artifacts/rubiks_pregrasp_corrected_fixture_relevance_input_binding.json \
+                --mesh-provenance /artifacts/rubiks_pregrasp_corrected_fixture_mesh_provenance.json \
+                --results /artifacts/rubiks_pregrasp_corrected_fixture_relevance_results.tsv \
+                --contract /artifacts/rubiks_pregrasp_corrected_fixture_relevance_contract.tsv \
+                --urdf /artifacts/accepted/accepted/turtlebot3_lime_fixture_current.urdf \
+                --srdf /artifacts/accepted/accepted/turtlebot3_lime_fixture_current.srdf \
+                --output /artifacts/rubiks_pregrasp_corrected_fixture_geometric_relevance_summary.json \
+                --manifest /artifacts/rubiks_pregrasp_corrected_fixture_geometric_relevance_evidence.manifest.json \
+                --source-ref "${SOURCE_REF}"
+            ' >artifacts/corrected_fixture_relevance.stdout.log \
+              2>artifacts/corrected_fixture_relevance.stderr.log
+
+      - name: Validate exact-head relevance evidence and decision
+        run: |
+          test -s artifacts/rubiks_pregrasp_corrected_fixture_geometric_relevance_summary.json
+          test -s artifacts/rubiks_pregrasp_corrected_fixture_geometric_relevance_evidence.manifest.json
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path('artifacts')
+          summary = json.loads((root / 'rubiks_pregrasp_corrected_fixture_geometric_relevance_summary.json').read_text())
+          manifest = json.loads((root / 'rubiks_pregrasp_corrected_fixture_geometric_relevance_evidence.manifest.json').read_text())
+
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(message)
+
+          require(summary.get('audit_passed') is True and summary.get('errors') == [], 'relevance audit failed')
+          require(summary.get('source_ref') == os.environ['EXACT_HEAD_SHA'], 'summary source mismatch')
+          require(summary.get('exact_head_bound') is True, 'exact-head flag missing')
+          decision = summary.get('decision')
+          require(decision in (
+              'CORRECTED_FIXTURE_GEOMETRICALLY_RELEVANT',
+              'BLOCKED_CORRECTED_FIXTURE_OUTSIDE_FINGER_REACH_ENVELOPE',
+          ), 'unexpected relevance decision')
+          relevant = summary.get('corrected_fixture_geometrically_relevant') is True
+          require((decision == 'CORRECTED_FIXTURE_GEOMETRICALLY_RELEVANT') is relevant, 'decision/relevance mismatch')
+          require(summary.get('correction_translation_link7_m') == [0.0, 0.0, 0.04575], 'translation mismatch')
+          require(summary.get('cube_center_link7_m') == [-0.019, 0.0, 0.16495], 'cube center mismatch')
+          require(set(summary.get('collision_mesh_aabb', {})) == {'gripper_left_link', 'gripper_right_link'}, 'mesh AABB coverage mismatch')
+          provenance = summary.get('mesh_provenance', {})
+          require(provenance.get('passed') is True, 'mesh provenance failed')
+          require('ROBOTIS-JAPAN-GIT/turtlebot3_lime' in provenance.get('source_repository', {}).get('origin', ''), 'unexpected external source origin')
+          require(len(provenance.get('source_repository', {}).get('commit', '')) == 40, 'external source commit missing')
+          limits = summary.get('claim_limits', {})
+          require(limits.get('collision_mesh_aabb_envelopes_only') is True, 'AABB claim missing')
+          for key in (
+              'exact_mesh_surface_contact_claimed', 'contact_normal_claimed',
+              'force_closure_claimed', 'friction_claimed',
+              'support_clearance_during_gripper_motion_claimed',
+              'ground_clearance_during_gripper_motion_claimed',
+              'grasp_success_claimed', 'lifting_or_transport_claimed',
+              'hardware_readiness_claimed',
+          ):
+              require(limits.get(key) is False, f'{key} must remain false')
+          safety = summary.get('safety', {})
+          require(safety.get('offline_analysis_only') is True, 'offline boundary missing')
+          for key in (
+              'gazebo_started', 'ros_node_created', 'object_spawned',
+              'controller_loaded', 'planning_request_created',
+              'trajectory_instantiated', 'command_sent', 'attachment_used',
+              'physical_hardware_used', 'production_runtime_modified',
+          ):
+              require(safety.get(key) is False, f'{key} must remain false')
+          require(manifest.get('source_ref') == os.environ['EXACT_HEAD_SHA'], 'manifest source mismatch')
+          require(manifest.get('decision') == decision, 'manifest decision mismatch')
+          require(manifest.get('corrected_fixture_geometrically_relevant') is relevant, 'manifest relevance mismatch')
+          require(len(manifest.get('inputs', {})) == 6, 'manifest input coverage mismatch')
+          print(json.dumps(summary, indent=2, sort_keys=True))
+          PY
+
+      - name: Upload corrected fixture relevance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-pregrasp-corrected-fixture-geometric-relevance-evidence
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
