@@ -27,6 +27,7 @@ jobs:
       EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       ACCEPTED_ARTIFACT_ID: "8890739787"
       ACCEPTED_ARTIFACT_SHA256: 9a56dea2d3384feec3622e60f733bf13d8798da768447fc9a33e18ed3ba7fa76
+      EXTERNAL_SOURCE_COMMIT: 3363b27aae6d37598dc142cf4dddb342fef3047f
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
@@ -37,6 +38,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
+          test "${#EXTERNAL_SOURCE_COMMIT}" -eq 40
           python3 -m py_compile \
             bin/prepare_rubiks_pregrasp_corrected_fixture_relevance.py \
             bin/capture_rubiks_gripper_mesh_provenance.py \
@@ -82,6 +84,7 @@ jobs:
                   'collision_mesh_aabb_envelopes_only',
               ),
               'provenance': (
+                  'expected-source-commit', 'exact_commit_bound',
                   'source_repository', 'sha256', 'gripper_left_link',
                   'gripper_right_link', 'read_only_filesystem_inspection',
               ),
@@ -129,10 +132,13 @@ jobs:
       - name: Fetch exact external gripper mesh source
         run: |
           set -euo pipefail
-          mkdir -p external
-          git clone --depth 1 --single-branch --branch humble-devel \
-            https://github.com/ROBOTIS-JAPAN-GIT/turtlebot3_lime.git \
-            external/turtlebot3_lime
+          mkdir -p external/turtlebot3_lime
+          git -C external/turtlebot3_lime init
+          git -C external/turtlebot3_lime remote add origin \
+            https://github.com/ROBOTIS-JAPAN-GIT/turtlebot3_lime.git
+          git -C external/turtlebot3_lime fetch --depth 1 origin "${EXTERNAL_SOURCE_COMMIT}"
+          git -C external/turtlebot3_lime checkout --detach "${EXTERNAL_SOURCE_COMMIT}"
+          test "$(git -C external/turtlebot3_lime rev-parse HEAD)" = "${EXTERNAL_SOURCE_COMMIT}"
           git -C external/turtlebot3_lime status --porcelain | tee artifacts/external_source_status.txt
           test ! -s artifacts/external_source_status.txt
           git -C external/turtlebot3_lime rev-parse HEAD | tee artifacts/external_source_commit.txt
@@ -153,6 +159,7 @@ jobs:
             --urdf artifacts/accepted/accepted/turtlebot3_lime_fixture_current.urdf \
             --package-share external/turtlebot3_lime/turtlebot3_lime_description \
             --source-repo external/turtlebot3_lime \
+            --expected-source-commit "${EXTERNAL_SOURCE_COMMIT}" \
             --output artifacts/rubiks_pregrasp_corrected_fixture_mesh_provenance.json \
             --source-ref "${EXACT_HEAD_SHA}" \
             >artifacts/corrected_fixture_relevance_provenance.stdout.log \
@@ -220,7 +227,9 @@ jobs:
           require(provenance.get('passed') is True, 'mesh provenance failed')
           source_repository = provenance.get('source_repository', {})
           require('ROBOTIS-JAPAN-GIT/turtlebot3_lime' in source_repository.get('origin', ''), 'unexpected external source origin')
-          require(len(source_repository.get('commit', '')) == 40, 'external source commit missing')
+          require(source_repository.get('commit') == os.environ['EXTERNAL_SOURCE_COMMIT'], 'external source commit mismatch')
+          require(source_repository.get('expected_commit') == os.environ['EXTERNAL_SOURCE_COMMIT'], 'expected source commit mismatch')
+          require(source_repository.get('exact_commit_bound') is True, 'external exact-commit flag missing')
           require(source_repository.get('clean') is True, 'external source clone is dirty')
           meshes = provenance.get('meshes', {})
           require(set(meshes) == {'gripper_left_link', 'gripper_right_link'}, 'mesh provenance coverage mismatch')
@@ -254,7 +263,7 @@ jobs:
           require(manifest.get('source_ref') == os.environ['EXACT_HEAD_SHA'], 'manifest source mismatch')
           require(manifest.get('decision') == decision, 'manifest decision mismatch')
           require(manifest.get('corrected_fixture_geometrically_relevant') is relevant, 'manifest relevance mismatch')
-          require(manifest.get('external_source_commit') == source_repository.get('commit'), 'manifest source commit mismatch')
+          require(manifest.get('external_source_commit') == os.environ['EXTERNAL_SOURCE_COMMIT'], 'manifest source commit mismatch')
           require(len(manifest.get('inputs', {})) == 6, 'manifest input coverage mismatch')
           print(json.dumps(summary, indent=2, sort_keys=True))
           PY
