@@ -89,14 +89,12 @@ ReachContract read_reach_contract(const std::string& path)
       throw std::runtime_error("empty reach contract row");
     if (fields[0] == "META")
     {
-      if (fields.size() != 7 || fields[1] != "1")
+      if (fields.size() != 6 || fields[1] != "1")
         throw std::runtime_error("invalid reach META row");
       contract.state_count = parse_integer(fields[2]);
       contract.anchor_index = parse_integer(fields[3]);
       contract.candidate_start_index = parse_integer(fields[4]);
       contract.reference_link = fields[5];
-      if (!fields[6].empty())
-        throw std::runtime_error("unexpected reach META tail");
       meta = true;
     }
     else if (fields[0] == "CUBE" || fields[0] == "SUPPORT")
@@ -403,19 +401,24 @@ int main(int argc, char** argv)
     bool fine_found = false;
     Eigen::Vector3d selected_delta = coarse_delta;
     std::size_t fine_total_count = 0;
-    std::size_t fine_relevant_count = 0;
+    std::vector<FineCandidate> fine_relevant;
     if (coarse_found)
     {
       const auto fine_all = fine_candidates(coarse_selected);
       fine_total_count = fine_all.size();
       if (fine_total_count != reach_contract.fine_count)
         throw std::runtime_error("fine candidate total mismatch");
+      fine_relevant.reserve(fine_total_count);
       for (const auto& candidate : fine_all)
       {
+        if (evaluate_reach(reach_contract, fine_translation(candidate)).relevant)
+          fine_relevant.push_back(candidate);
+      }
+      if (fine_relevant.empty())
+        throw std::runtime_error("coarse relevant candidate has no relevant fine candidates");
+      for (const auto& candidate : fine_relevant)
+      {
         const Eigen::Vector3d delta = fine_translation(candidate);
-        if (!evaluate_reach(reach_contract, delta).relevant)
-          continue;
-        ++fine_relevant_count;
         const Evaluation evaluation = evaluate_translation(
           scene, prepared, fixture, world_link7_anchor, delta, fixture_acm, request);
         record_evaluation(fine_stats, evaluation);
@@ -431,10 +434,13 @@ int main(int argc, char** argv)
     }
 
     const bool selected_found = coarse_found && fine_found;
-    const ReachEvaluation selected_reach = evaluate_reach(
-      reach_contract, selected_delta);
-    if (selected_found && !selected_reach.relevant)
-      throw std::runtime_error("selected candidate lost grasp relevance");
+    ReachEvaluation selected_reach;
+    if (selected_found)
+    {
+      selected_reach = evaluate_reach(reach_contract, selected_delta);
+      if (!selected_reach.relevant)
+        throw std::runtime_error("selected candidate lost grasp relevance");
+    }
     const std::string decision = selected_found ?
       "FULL_PATH_CLEAR_GRASP_RELEVANT_TRANSLATION_FOUND" :
       "NO_FULL_PATH_CLEAR_GRASP_RELEVANT_TRANSLATION_WITHIN_COARSE_RADIUS";
@@ -458,11 +464,11 @@ int main(int argc, char** argv)
       COARSE_RADIUS_STEPS * COARSE_STEP_M, coarse_relevant.size(),
       coarse_stats, coarse_found, coarse_delta);
     output << "FILTER\tFINE\t" << fine_total_count << '\t'
-           << fine_relevant_count << '\t'
-           << (fine_total_count - fine_relevant_count) << "\t0\t0\n";
+           << fine_relevant.size() << '\t'
+           << (fine_total_count - fine_relevant.size()) << "\t0\t0\n";
     write_search_stats(
       output, "FINE", FINE_STEP_M,
-      FINE_RADIUS_STEPS * FINE_STEP_M, fine_relevant_count,
+      FINE_RADIUS_STEPS * FINE_STEP_M, fine_relevant.size(),
       fine_stats, fine_found, selected_delta);
     output << "SELECT\t" << (selected_found ? "true" : "false") << '\t'
            << selected_delta.x() << '\t' << selected_delta.y() << '\t'
