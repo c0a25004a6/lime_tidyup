@@ -39,6 +39,7 @@ def main() -> int:
     parser.add_argument("--urdf", required=True)
     parser.add_argument("--package-share", required=True)
     parser.add_argument("--source-repo", required=True)
+    parser.add_argument("--expected-source-commit", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--source-ref", required=True)
     args = parser.parse_args()
@@ -49,6 +50,7 @@ def main() -> int:
     require(urdf_path.is_file(), "URDF is missing")
     require(package_share.is_dir(), "package share is missing")
     require((source_repo / ".git").exists(), "source repository is missing")
+    require(len(args.expected_source_commit) == 40, "expected source commit is invalid")
 
     root = ET.parse(urdf_path).getroot()
     links = {str(link.get("name")): link for link in root.findall("link")}
@@ -56,9 +58,9 @@ def main() -> int:
     for link_name in EXPECTED_LINKS:
         link = links.get(link_name)
         require(link is not None, f"missing link: {link_name}")
-        collision = link.find("collision")
-        require(collision is not None, f"missing collision: {link_name}")
-        mesh = collision.find("geometry/mesh")
+        collisions = link.findall("collision")
+        require(len(collisions) == 1, f"collision count mismatch: {link_name}")
+        mesh = collisions[0].find("geometry/mesh")
         require(mesh is not None, f"collision is not a mesh: {link_name}")
         filename = str(mesh.get("filename", ""))
         scale = [float(value) for value in str(mesh.get("scale", "")).split()]
@@ -78,10 +80,11 @@ def main() -> int:
         }
 
     commit = git(source_repo, "rev-parse", "HEAD")
-    require(len(commit) == 40, "invalid source repository commit")
+    require(commit == args.expected_source_commit, "external source commit mismatch")
     status = git(source_repo, "status", "--porcelain")
     require(status == "", "source repository is dirty")
     remote = git(source_repo, "remote", "get-url", "origin")
+    require("ROBOTIS-JAPAN-GIT/turtlebot3_lime" in remote, "unexpected source repository origin")
     payload = {
         "schema_version": 1,
         "phase": "RUBIK-PREGRASP-CORRECTED-FIXTURE-GEOMETRIC-RELEVANCE-MESH-PROVENANCE",
@@ -91,8 +94,10 @@ def main() -> int:
         "source_repository": {
             "path": str(source_repo),
             "commit": commit,
+            "expected_commit": args.expected_source_commit,
             "origin": remote,
             "clean": True,
+            "exact_commit_bound": True,
         },
         "urdf": {
             "path": str(urdf_path.resolve()),
