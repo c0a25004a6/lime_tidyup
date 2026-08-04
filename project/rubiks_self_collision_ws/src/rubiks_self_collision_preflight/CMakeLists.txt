@@ -1,8 +1,7 @@
 cmake_minimum_required(VERSION 3.8)
 project(rubiks_self_collision_preflight)
 
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-  add_compile_options(-Wall -Wextra -Wpedantic -Werror)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")n  add_compile_options(-Wall -Wextra -Wpedantic -Werror)
 endif()
 
 find_package(ament_cmake REQUIRED)
@@ -32,12 +31,17 @@ add_executable(rubiks_fixture_alignment_search_preflight src/rubiks_fixture_alig
 target_compile_features(rubiks_fixture_alignment_search_preflight PUBLIC cxx_std_17)
 ament_target_dependencies(rubiks_fixture_alignment_search_preflight geometric_shapes moveit_core moveit_ros_planning srdfdom urdf)
 
+add_executable(rubiks_grasp_relevance_constrained_fixture_search_preflight src/rubiks_grasp_relevance_constrained_fixture_search_preflight.cpp)
+target_compile_features(rubiks_grasp_relevance_constrained_fixture_search_preflight PUBLIC cxx_std_17)
+ament_target_dependencies(rubiks_grasp_relevance_constrained_fixture_search_preflight geometric_shapes moveit_core moveit_ros_planning srdfdom urdf)
+
 install(TARGETS
   rubiks_self_collision_preflight
   rubiks_ground_plane_clearance_preflight
   rubiks_gripper_ground_clearance_preflight
   rubiks_fixture_placement_offline_preflight
   rubiks_fixture_alignment_search_preflight
+  rubiks_grasp_relevance_constrained_fixture_search_preflight
   DESTINATION lib/${PROJECT_NAME}
 )
 
