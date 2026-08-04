@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 3.8)
 project(rubiks_self_collision_preflight)
 
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")n  add_compile_options(-Wall -Wextra -Wpedantic -Werror)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic -Werror)
 endif()
 
 find_package(ament_cmake REQUIRED)
