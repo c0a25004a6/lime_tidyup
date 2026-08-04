@@ -17,18 +17,29 @@ The workflow digest-binds the accepted PR #23 artifact, including:
 - exact anchor arm and passive finger state;
 - complete 2,802-state collision-clear path evidence.
 
-It also records the exact `ROBOTIS-JAPAN-GIT/turtlebot3_lime` clone commit, origin, clean status, and SHA-256/size/resource path for both collision STL files.
+It shallow-clones `ROBOTIS-JAPAN-GIT/turtlebot3_lime` only to resolve the exact collision STL resources named by the accepted URDF. Evidence records the clone commit, origin, clean status, and SHA-256/size/resource path for both STL files.
 
 ## Geometry contract
 
-The checker loads the accepted MoveIt robot model and requires each finger link to contain exactly one collision mesh. It evaluates the mesh AABB envelope in `link7` coordinates at:
+The checker uses only the Python standard library. It does not load ROS, Gazebo, MoveIt, FCL, a planner, or a controller.
+
+For each finger link it requires:
+
+- exactly one URDF collision element;
+- a `package://turtlebot3_lime_description/...` STL resource;
+- scale exactly `(0.001, 0.001, 0.001)`;
+- unrotated collision and prismatic-joint origins;
+- left axis `+Y` and right axis `-Y`;
+- binary or ASCII STL with finite vertices and a consistent triangle count.
+
+The checker reads every triangle vertex, applies the exact URDF scale and transforms, and calculates the collision-mesh AABB envelope in `link7` coordinates at:
 
 - lower gripper limit;
 - zero;
 - accepted passive position;
 - upper gripper limit.
 
-The joint model must remain an unrotated linear mimic pair: the left AABB translates `+Y` by the requested joint position and the right AABB translates `-Y`, while X/Z bounds remain invariant to `1e-12 m`.
+The left AABB translates `+Y` by the requested joint position and the right AABB translates `-Y`; X/Z geometry is unchanged analytically by the declared prismatic model.
 
 A corrected fixture is geometrically relevant only when both conditions hold:
 
@@ -44,7 +55,7 @@ The completed evidence records one of:
 - `CORRECTED_FIXTURE_GEOMETRICALLY_RELEVANT`; or
 - `BLOCKED_CORRECTED_FIXTURE_OUTSIDE_FINGER_REACH_ENVELOPE`.
 
-A positive result is only a necessary AABB-envelope condition. It does not prove exact mesh contact, contact normals, force closure, friction, support/ground clearance during gripper motion, grasp success, lifting, transport, placement, or hardware readiness.
+A positive result is only a necessary AABB-envelope condition. It does not prove exact mesh surface contact, contact normals, force closure, friction, support/ground clearance during gripper motion, grasp success, lifting, transport, placement, or hardware readiness.
 
 ## Next safe phase
 
@@ -54,8 +65,8 @@ When blocked, the next authorized phase is a new offline fixture search that inc
 
 ## Safety boundary
 
-- command-free offline analysis only;
-- no Gazebo or ROS node;
+- command-free standard-library offline analysis only;
+- no ROS, Gazebo, MoveIt, FCL, or hardware interface;
 - no object spawn;
 - no controller, planning request, trajectory, or command;
 - no attachment or physical hardware;
