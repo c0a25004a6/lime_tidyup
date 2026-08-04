@@ -9,6 +9,7 @@ import math
 from pathlib import Path
 
 EXPECTED_ACCEPTED_SOURCE = "fa78493ca98b5c9701ccf2f6da5ae0ee3a2cbcee"
+EXPECTED_LINKS = {"gripper_left_link", "gripper_right_link"}
 VALID_DECISIONS = {
     "CORRECTED_FIXTURE_GEOMETRICALLY_RELEVANT",
     "BLOCKED_CORRECTED_FIXTURE_OUTSIDE_FINGER_REACH_ENVELOPE",
@@ -30,6 +31,12 @@ def number(text: str) -> float:
     return value
 
 
+def positive_integer(text: str, label: str) -> int:
+    value = int(text)
+    require(str(value) == text and value > 0, f"invalid positive integer for {label}: {text}")
+    return value
+
+
 def boolean(text: str) -> bool:
     require(text in {"true", "false"}, f"invalid boolean: {text}")
     return text == "true"
@@ -39,6 +46,7 @@ def parse_results(path: Path) -> dict[str, object]:
     meta: list[str] | None = None
     cube: list[float] | None = None
     meshes: dict[str, dict[str, object]] = {}
+    stls: dict[str, dict[str, object]] = {}
     positions: dict[str, dict[str, object]] = {}
     interval: dict[str, object] | None = None
     decision: dict[str, object] | None = None
@@ -47,18 +55,35 @@ def parse_results(path: Path) -> dict[str, object]:
             continue
         fields = raw.split("\t")
         if fields[0] == "META":
+            require(meta is None, "duplicate META row")
             require(len(fields) == 6 and fields[1] == "1", "invalid META row")
             meta = fields[1:]
         elif fields[0] == "CUBE":
+            require(cube is None, "duplicate CUBE row")
             require(len(fields) == 7, "invalid CUBE row")
             cube = [number(value) for value in fields[1:]]
         elif fields[0] == "MESH":
             require(len(fields) == 9, "invalid MESH row")
             require(fields[1] not in meshes, "duplicate MESH row")
             meshes[fields[1]] = {
-                "shape_count": int(fields[2]),
+                "shape_count": positive_integer(fields[2], "shape count"),
                 "local_aabb_center_m": [number(value) for value in fields[3:6]],
                 "local_aabb_extents_m": [number(value) for value in fields[6:9]],
+            }
+        elif fields[0] == "STL":
+            require(len(fields) == 6, "invalid STL row")
+            link = fields[1]
+            require(link not in stls, "duplicate STL row")
+            require(fields[2] in {"binary", "ascii"}, f"invalid STL format: {fields[2]}")
+            triangle_count = positive_integer(fields[3], "triangle count")
+            vertex_count = positive_integer(fields[4], "vertex count")
+            require(vertex_count == triangle_count * 3, f"STL vertex/triangle mismatch: {link}")
+            require(fields[5].startswith("package://turtlebot3_lime_description/"), f"invalid STL resource: {link}")
+            stls[link] = {
+                "format": fields[2],
+                "triangle_count": triangle_count,
+                "vertex_count": vertex_count,
+                "resource": fields[5],
             }
         elif fields[0] == "POSITION":
             require(len(fields) == 23, "invalid POSITION row")
@@ -79,6 +104,7 @@ def parse_results(path: Path) -> dict[str, object]:
                 "right_cube_side_inside_aabb": boolean(fields[22]),
             }
         elif fields[0] == "INTERVAL":
+            require(interval is None, "duplicate INTERVAL row")
             require(len(fields) == 11, "invalid INTERVAL row")
             interval = {
                 "left_reachable_low_m": number(fields[1]),
@@ -93,6 +119,7 @@ def parse_results(path: Path) -> dict[str, object]:
                 "representative_right_side_inside": boolean(fields[10]),
             }
         elif fields[0] == "DECISION":
+            require(decision is None, "duplicate DECISION row")
             require(len(fields) == 5, "invalid DECISION row")
             decision = {
                 "value": fields[1],
@@ -103,12 +130,14 @@ def parse_results(path: Path) -> dict[str, object]:
         else:
             raise ValueError(f"unknown result row: {fields[0]}")
     require(meta is not None and cube is not None and interval is not None and decision is not None, "result rows are incomplete")
-    require(set(meshes) == {"gripper_left_link", "gripper_right_link"}, "mesh rows mismatch")
+    require(set(meshes) == EXPECTED_LINKS, "mesh rows mismatch")
+    require(set(stls) == EXPECTED_LINKS, "STL rows mismatch")
     require(set(positions) == {"lower", "zero", "passive", "upper"}, "position rows mismatch")
     return {
         "meta": meta,
         "cube": cube,
         "meshes": meshes,
+        "stls": stls,
         "positions": positions,
         "interval": interval,
         "decision": decision,
@@ -151,11 +180,13 @@ def main() -> int:
     require(provenance.get("passed") is True and provenance.get("errors") == [], "mesh provenance failed")
     require(provenance.get("source_ref") == args.source_ref, "mesh provenance exact-head mismatch")
     meshes = provenance.get("meshes", {})
-    require(set(meshes) == {"gripper_left_link", "gripper_right_link"}, "mesh provenance coverage mismatch")
+    require(set(meshes) == EXPECTED_LINKS, "mesh provenance coverage mismatch")
     for link, entry in meshes.items():
         require(entry.get("scale") == [0.001, 0.001, 0.001], f"mesh scale mismatch: {link}")
         require(isinstance(entry.get("sha256"), str) and len(entry["sha256"]) == 64, f"mesh digest missing: {link}")
         require(isinstance(entry.get("size_bytes"), int) and entry["size_bytes"] > 0, f"mesh size missing: {link}")
+        stl = parsed["stls"][link]
+        require(stl["resource"] == entry.get("resource"), f"STL resource/provenance mismatch: {link}")
     source_repository = provenance.get("source_repository", {})
     require(source_repository.get("clean") is True, "external source clone is dirty")
     require(isinstance(source_repository.get("commit"), str) and len(source_repository["commit"]) == 40, "external source commit missing")
@@ -222,6 +253,7 @@ def main() -> int:
         "cube_center_link7_m": binding["corrected_cube_center_link7_m"],
         "cube_size_m": parsed["cube"][:3],
         "mesh_provenance": provenance,
+        "stl_geometry": parsed["stls"],
         "collision_mesh_aabb": parsed["meshes"],
         "evaluated_positions": positions,
         "simultaneous_side_plane_interval": interval,
@@ -229,6 +261,7 @@ def main() -> int:
         "simultaneous_mimic_side_plane_reachability": representative_reaches,
         "next_required_phase": next_phase,
         "claim_limits": {
+            "exact_urdf_referenced_stl_vertices_used": True,
             "collision_mesh_aabb_envelopes_only": True,
             "exact_mesh_surface_contact_claimed": False,
             "contact_normal_claimed": False,
@@ -242,9 +275,11 @@ def main() -> int:
         },
         "safety": {
             "offline_analysis_only": True,
+            "standard_library_geometry_audit_only": True,
             "accepted_arm_and_passive_finger_states_unchanged": True,
             "gazebo_started": False,
             "ros_node_created": False,
+            "moveit_model_loaded": False,
             "object_spawned": False,
             "controller_loaded": False,
             "planning_request_created": False,
@@ -266,6 +301,7 @@ def main() -> int:
         "corrected_fixture_geometrically_relevant": relevant,
         "external_source_commit": source_repository["commit"],
         "mesh_sha256": {link: entry["sha256"] for link, entry in meshes.items()},
+        "stl_triangle_count": {link: entry["triangle_count"] for link, entry in parsed["stls"].items()},
         "inputs": input_digests,
         "summary": {"path": output.name, "sha256": sha256(output)},
     }
