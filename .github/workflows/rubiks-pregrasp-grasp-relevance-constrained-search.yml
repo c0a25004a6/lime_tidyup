@@ -1,0 +1,207 @@
+name: Rubik grasp-relevance constrained fixture search
+
+on:
+  pull_request:
+    paths:
+      - "bin/generate_rubiks_grasp_relevance_candidates.py"
+      - "bin/summarize_rubiks_grasp_relevance_constrained_search.py"
+      - "project/rubiks_self_collision_ws/**"
+      - ".github/workflows/rubiks-pregrasp-grasp-relevance-constrained-search.yml"
+      - "doc/rubiks_pregrasp_grasp_relevance_constrained_search.md"
+      - "Dockerfile"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: rubiks-grasp-relevance-constrained-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  constrained-search:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PR23_ARTIFACT_ID: "8890739787"
+      PR23_ARTIFACT_SHA256: 9a56dea2d3384feec3622e60f733bf13d8798da768447fc9a33e18ed3ba7fa76
+      PR24_ARTIFACT_ID: "8899235338"
+      PR24_ARTIFACT_SHA256: 07ab22da2516b46182871e95a6324fc4325d806999e73bd80954811dac963e65
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXACT_HEAD_SHA }}
+
+      - name: Validate exact checkout and implementation boundary
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
+          python3 -m py_compile \
+            bin/generate_rubiks_grasp_relevance_candidates.py \
+            bin/summarize_rubiks_grasp_relevance_constrained_search.py
+          python3 - <<'PY'
+          from pathlib import Path
+          generator = Path('bin/generate_rubiks_grasp_relevance_candidates.py').read_text()
+          summary = Path('bin/summarize_rubiks_grasp_relevance_constrained_search.py').read_text()
+          checker = Path('project/rubiks_self_collision_ws/src/rubiks_self_collision_preflight/src/rubiks_relevance_candidate_batch_preflight.cpp').read_text()
+          cmake = Path('project/rubiks_self_collision_ws/src/rubiks_self_collision_preflight/CMakeLists.txt').read_text()
+          for token in ('COARSE_STEP_M = 0.002', 'FINE_STEP_M = 0.00025', 'positive_xz', 'common_low', 'EXPECTED_PR24_SOURCE'):
+              if token not in generator:
+                  raise SystemExit(f'candidate generator lacks {token}')
+          for token in ('baseline PR22 blocker mismatch', 'states_checked', 'rubiks_cube', 'rubiks_support', 'checkCollision'):
+              if token not in checker:
+                  raise SystemExit(f'batch evaluator lacks {token}')
+          for token in ('GRASP_RELEVANT_FULL_PATH_CLEAR_TRANSLATION_FOUND', 'full_path_state_count', 'positive_left_right_xz_aabb_overlap_required'):
+              if token not in summary:
+                  raise SystemExit(f'summary lacks {token}')
+          if 'rubiks_relevance_candidate_batch_preflight' not in cmake:
+              raise SystemExit('batch evaluator target is not installed')
+          for forbidden in ('ActionClient', 'MoveGroupInterface', 'FollowJointTrajectory', 'GripperCommand'):
+              if forbidden in checker:
+                  raise SystemExit(f'checker contains command path: {forbidden}')
+          PY
+
+      - name: Download accepted PR23 and PR24 evidence
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/pr23 artifacts/pr24
+          curl --fail --location --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PR23_ARTIFACT_ID}/zip" \
+            -o artifacts/pr23.zip
+          printf '%s  %s\n' "${PR23_ARTIFACT_SHA256}" artifacts/pr23.zip | sha256sum --check --strict
+          unzip -q artifacts/pr23.zip -d artifacts/pr23
+          curl --fail --location --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PR24_ARTIFACT_ID}/zip" \
+            -o artifacts/pr24.zip
+          printf '%s  %s\n' "${PR24_ARTIFACT_SHA256}" artifacts/pr24.zip | sha256sum --check --strict
+          unzip -q artifacts/pr24.zip -d artifacts/pr24
+          test -s artifacts/pr23/rubiks_pregrasp_fixture_alignment_search_summary.json
+          test -s artifacts/pr23/accepted/pregrasp/rubiks_pregrasp_gripper_ground_states.tsv
+          test -s artifacts/pr23/accepted/rubiks_pregrasp_fixture_contract.tsv
+          test -s artifacts/pr24/rubiks_pregrasp_corrected_fixture_geometric_relevance_summary.json
+
+      - name: Build exact-head Lime image
+        run: docker build -t lime-tidyup-grasp-relevance:${EXACT_HEAD_SHA} .
+
+      - name: Run relevance-filtered coarse and fine search
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -e SOURCE_REF="${EXACT_HEAD_SHA}" \
+            -v "$PWD/artifacts:/artifacts" \
+            lime-tidyup-grasp-relevance:${EXACT_HEAD_SHA} \
+            bash -lc '
+              set -euo pipefail
+              source /opt/ros/humble/setup.bash
+              source /project/lib_ws/install/setup.bash
+              source /root/turtlebot3_ws/install/setup.bash
+
+              python3 /root/bin/generate_rubiks_grasp_relevance_candidates.py \
+                --relevance-summary /artifacts/pr24/rubiks_pregrasp_corrected_fixture_geometric_relevance_summary.json \
+                --fixture /artifacts/pr23/accepted/rubiks_pregrasp_fixture_contract.tsv \
+                --mode coarse \
+                --output /artifacts/rubiks_grasp_relevance_coarse_candidates.tsv
+
+              colcon build \
+                --merge-install \
+                --base-paths /project/rubiks_self_collision_ws/src \
+                --build-base /tmp/rubiks_grasp_relevance_build \
+                --install-base /tmp/rubiks_grasp_relevance_install \
+                --cmake-args -DCMAKE_BUILD_TYPE=Release \
+                --event-handlers console_direct+
+              source /tmp/rubiks_grasp_relevance_install/setup.bash
+
+              /tmp/rubiks_grasp_relevance_install/lib/rubiks_self_collision_preflight/rubiks_relevance_candidate_batch_preflight \
+                /artifacts/pr23/accepted/turtlebot3_lime_fixture_current.urdf \
+                /artifacts/pr23/accepted/turtlebot3_lime_fixture_current.srdf \
+                /artifacts/pr23/accepted/pregrasp/rubiks_pregrasp_gripper_ground_states.tsv \
+                /artifacts/pr23/accepted/rubiks_pregrasp_fixture_contract.tsv \
+                /artifacts/rubiks_grasp_relevance_coarse_candidates.tsv \
+                /artifacts/rubiks_grasp_relevance_coarse_results.tsv
+
+              if grep -q $'"'"'^SELECT\ttrue\t'"'"' /artifacts/rubiks_grasp_relevance_coarse_results.tsv; then
+                python3 /root/bin/generate_rubiks_grasp_relevance_candidates.py \
+                  --relevance-summary /artifacts/pr24/rubiks_pregrasp_corrected_fixture_geometric_relevance_summary.json \
+                  --fixture /artifacts/pr23/accepted/rubiks_pregrasp_fixture_contract.tsv \
+                  --mode fine \
+                  --coarse-results /artifacts/rubiks_grasp_relevance_coarse_results.tsv \
+                  --output /artifacts/rubiks_grasp_relevance_fine_candidates.tsv
+                /tmp/rubiks_grasp_relevance_install/lib/rubiks_self_collision_preflight/rubiks_relevance_candidate_batch_preflight \
+                  /artifacts/pr23/accepted/turtlebot3_lime_fixture_current.urdf \
+                  /artifacts/pr23/accepted/turtlebot3_lime_fixture_current.srdf \
+                  /artifacts/pr23/accepted/pregrasp/rubiks_pregrasp_gripper_ground_states.tsv \
+                  /artifacts/pr23/accepted/rubiks_pregrasp_fixture_contract.tsv \
+                  /artifacts/rubiks_grasp_relevance_fine_candidates.tsv \
+                  /artifacts/rubiks_grasp_relevance_fine_results.tsv
+              fi
+
+              summary_args=(
+                --pr23-summary /artifacts/pr23/rubiks_pregrasp_fixture_alignment_search_summary.json
+                --pr24-summary /artifacts/pr24/rubiks_pregrasp_corrected_fixture_geometric_relevance_summary.json
+                --coarse-candidates /artifacts/rubiks_grasp_relevance_coarse_candidates.tsv
+                --coarse-results /artifacts/rubiks_grasp_relevance_coarse_results.tsv
+                --output /artifacts/rubiks_grasp_relevance_constrained_search_summary.json
+                --manifest /artifacts/rubiks_grasp_relevance_constrained_search_evidence.manifest.json
+                --source-ref "${SOURCE_REF}"
+              )
+              if [[ -s /artifacts/rubiks_grasp_relevance_fine_results.tsv ]]; then
+                summary_args+=(
+                  --fine-candidates /artifacts/rubiks_grasp_relevance_fine_candidates.tsv
+                  --fine-results /artifacts/rubiks_grasp_relevance_fine_results.tsv
+                )
+              fi
+              python3 /root/bin/summarize_rubiks_grasp_relevance_constrained_search.py "${summary_args[@]}"
+            ' >artifacts/grasp_relevance_search.stdout.log \
+              2>artifacts/grasp_relevance_search.stderr.log
+
+      - name: Validate exact-head search evidence
+        run: |
+          set -euo pipefail
+          test -s artifacts/rubiks_grasp_relevance_constrained_search_summary.json
+          test -s artifacts/rubiks_grasp_relevance_constrained_search_evidence.manifest.json
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path('artifacts')
+          summary = json.loads((root / 'rubiks_grasp_relevance_constrained_search_summary.json').read_text())
+          manifest = json.loads((root / 'rubiks_grasp_relevance_constrained_search_evidence.manifest.json').read_text())
+          def req(value, message):
+              if not value:
+                  raise SystemExit(message)
+          req(summary.get('audit_passed') is True and summary.get('errors') == [], 'search audit failed')
+          req(summary.get('source_ref') == os.environ['EXACT_HEAD_SHA'], 'summary source mismatch')
+          req(summary.get('full_path_state_count') == 2802, 'state count mismatch')
+          req(summary.get('decision') in (
+              'GRASP_RELEVANT_FULL_PATH_CLEAR_TRANSLATION_FOUND',
+              'NO_GRASP_RELEVANT_FULL_PATH_CLEAR_TRANSLATION_IN_COARSE_DOMAIN',
+              'BLOCKED_FINE_REFINEMENT_LOST_FULL_PATH_CLEAR_TRANSLATION',
+          ), 'unexpected decision')
+          if summary.get('candidate_found'):
+              selected = summary.get('selected_candidate', {})
+              req(selected.get('selected_states_checked') == 2802, 'selected candidate lacks full path evidence')
+              req(summary.get('next_required_phase') == 'RUBIK-PREGRASP-CORRECTED-FIXTURE-OFFLINE-GRIPPER-SWEEP-COLLISION-PREFLIGHT', 'next phase mismatch')
+          safety = summary.get('safety', {})
+          for key in ('gazebo_started','ros_node_created','object_spawned','controller_loaded','planning_request_created','trajectory_instantiated','command_sent','attachment_used','physical_hardware_used','production_runtime_modified'):
+              req(safety.get(key) is False, f'{key} must remain false')
+          req(manifest.get('source_ref') == os.environ['EXACT_HEAD_SHA'], 'manifest source mismatch')
+          req(manifest.get('decision') == summary.get('decision'), 'manifest decision mismatch')
+          print(json.dumps(summary, indent=2, sort_keys=True))
+          PY
+
+      - name: Upload constrained-search evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-pregrasp-grasp-relevance-constrained-search-evidence
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
