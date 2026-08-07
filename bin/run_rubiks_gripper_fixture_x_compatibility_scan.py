@@ -23,10 +23,10 @@ def read_candidates(path: Path) -> list[dict[str, object]]:
             continue
         fields = raw.split("\t")
         if fields[0] == "META":
-            require(len(fields) == 10 and fields[1:3] == ["1", "X"], "invalid candidate META")
+            require(len(fields) == 9 and fields[1:3] == ["1", "X"], "invalid candidate META")
             require(int(fields[5]) == 17, "unexpected X candidate count")
             continue
-        require(fields[0] == "CANDIDATE" and len(fields) == 8, "invalid candidate row")
+        require(fields[0] == "CANDIDATE" and len(fields) == 7, "invalid candidate row")
         rows.append({
             "rank": int(fields[1]),
             "translation": [float(value) for value in fields[2:5]],
