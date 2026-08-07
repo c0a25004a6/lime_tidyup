@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Generate deterministic local translation candidates around the PR26 selection."""
+"""Generate the first deterministic local X-axis compatibility scan around PR26."""
 from __future__ import annotations
 
 import argparse
 import json
-import math
 from pathlib import Path
 
 PR27_SOURCE = "bffc9619efe3db79ab89cb282a93e4d1f1ae6ca1"
@@ -30,30 +29,24 @@ def main() -> int:
     require(summary.get("decision") == "BLOCKED_FORBIDDEN_COLLISION_BEFORE_DUAL_CONTACT", "PR27 blocker mismatch")
     require(summary.get("selected_translation_link7_m") == list(CENTER), "PR27 center mismatch")
 
-    offsets = []
-    for x in range(-RADIUS_STEPS, RADIUS_STEPS + 1):
-        for y in range(-RADIUS_STEPS, RADIUS_STEPS + 1):
-            for z in range(-RADIUS_STEPS, RADIUS_STEPS + 1):
-                offsets.append((x, y, z))
-    offsets.sort(key=lambda item: (
-        item[0] * item[0] + item[1] * item[1] + item[2] * item[2],
-        abs(item[2]), abs(item[1]), abs(item[0]), item[2], item[1], item[0],
-    ))
-
+    offsets = list(range(-RADIUS_STEPS, RADIUS_STEPS + 1))
+    offsets.sort(key=lambda value: (abs(value), value))
     output = Path(args.output)
     with output.open("w", encoding="utf-8") as stream:
         stream.write(
-            f"META\t1\t{STEP_M:.17g}\t{RADIUS_STEPS}\t{len(offsets)}\t"
+            f"META\t1\tX\t{STEP_M:.17g}\t{RADIUS_STEPS}\t{len(offsets)}\t"
             f"{CENTER[0]:.17g}\t{CENTER[1]:.17g}\t{CENTER[2]:.17g}\n"
         )
         for rank, offset in enumerate(offsets):
-            delta = tuple(CENTER[index] + offset[index] * STEP_M for index in range(3))
-            distance = math.sqrt(sum((offset[index] * STEP_M) ** 2 for index in range(3)))
+            x = CENTER[0] + offset * STEP_M
             stream.write(
-                f"CANDIDATE\t{rank}\t{delta[0]:.17g}\t{delta[1]:.17g}\t{delta[2]:.17g}\t"
-                f"{distance:.17g}\t{offset[0]}\t{offset[1]}\t{offset[2]}\n"
+                f"CANDIDATE\t{rank}\t{x:.17g}\t{CENTER[1]:.17g}\t{CENTER[2]:.17g}\t"
+                f"{abs(offset) * STEP_M:.17g}\t{offset}\n"
             )
-    print(json.dumps({"candidate_count": len(offsets), "center_m": CENTER, "step_m": STEP_M}, sort_keys=True))
+    print(json.dumps({
+        "axis": "X", "candidate_count": len(offsets), "center_m": CENTER,
+        "step_m": STEP_M, "radius_m": RADIUS_STEPS * STEP_M,
+    }, sort_keys=True))
     return 0
 
 
