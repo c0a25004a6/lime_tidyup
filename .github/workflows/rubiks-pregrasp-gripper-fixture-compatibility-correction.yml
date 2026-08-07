@@ -122,7 +122,7 @@ jobs:
                 --scan-output /artifacts/rubiks_gripper_fixture_x_scan.tsv \
                 --compatible-candidates /artifacts/rubiks_gripper_fixture_x_compatible_candidates.tsv
 
-              compatible_count="$(awk -F '\t' '$1=="META" {print $4}' /artifacts/rubiks_gripper_fixture_x_compatible_candidates.tsv)"
+              compatible_count="$(head -n1 /artifacts/rubiks_gripper_fixture_x_compatible_candidates.tsv | cut -f4)"
               if [[ "${compatible_count}" -gt 0 ]]; then
                 /tmp/rubiks_fixture_compat_install/lib/rubiks_self_collision_preflight/rubiks_relevance_candidate_batch_preflight \
                   /artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.urdf \
