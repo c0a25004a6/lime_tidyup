@@ -12,6 +12,7 @@ import xml.etree.ElementTree as ET
 EXPECTED_LINKS = ("gripper_left_link", "gripper_right_link")
 EXPECTED_PACKAGE = "package://turtlebot3_lime_description/"
 EXPECTED_SCALE = [0.001, 0.001, 0.001]
+SOURCE_PACKAGE_DIR = "turtlebot3_lime_description"
 
 
 def require(condition: bool, message: str) -> None:
@@ -45,12 +46,21 @@ def main() -> int:
     args = parser.parse_args()
 
     urdf_path = Path(args.urdf)
-    package_share = Path(args.package_share).resolve()
+    # Keep the install-space spelling as evidence.  With colcon symlink-install,
+    # individual resources legitimately resolve into the source checkout.
+    package_share_lexical = Path(args.package_share).absolute()
     source_repo = Path(args.source_repo).resolve()
     require(urdf_path.is_file(), "URDF is missing")
-    require(package_share.is_dir(), "package share is missing")
+    require(package_share_lexical.is_dir(), "package share is missing")
     require((source_repo / ".git").exists(), "source repository is missing")
     require(len(args.expected_source_commit) == 40, "expected source commit is invalid")
+
+    commit = git(source_repo, "rev-parse", "HEAD")
+    require(commit == args.expected_source_commit, "external source commit mismatch")
+    status = git(source_repo, "status", "--porcelain")
+    require(status == "", "source repository is dirty")
+    remote = git(source_repo, "remote", "get-url", "origin")
+    require("ROBOTIS-JAPAN-GIT/turtlebot3_lime" in remote, "unexpected source repository origin")
 
     root = ET.parse(urdf_path).getroot()
     links = {str(link.get("name")): link for link in root.findall("link")}
@@ -67,26 +77,37 @@ def main() -> int:
         require(filename.startswith(EXPECTED_PACKAGE), f"unexpected mesh package: {link_name}")
         require(scale == EXPECTED_SCALE, f"unexpected mesh scale: {link_name}")
         relative = filename[len(EXPECTED_PACKAGE):]
-        resolved = (package_share / relative).resolve()
-        require(resolved.is_file(), f"mesh file missing: {resolved}")
-        require(package_share in resolved.parents, f"mesh escaped package share: {resolved}")
+        install_entry = package_share_lexical / relative
+        require(install_entry.is_file(), f"mesh install entry missing: {install_entry}")
+        resolved = install_entry.resolve()
+        require(resolved.is_file(), f"mesh file missing after symlink resolution: {resolved}")
+
+        # The Lime image is built with colcon symlink-install.  A package URI
+        # therefore enters through the install-space package share but may
+        # resolve to the corresponding file in the exact git checkout.  Bind
+        # both sides instead of requiring the resolved inode to remain under
+        # install/.  Any different destination fails closed.
+        expected_source = (source_repo / SOURCE_PACKAGE_DIR / relative).resolve()
+        require(
+            resolved == expected_source,
+            f"mesh symlink target/source checkout mismatch: {resolved} != {expected_source}",
+        )
+        require(source_repo in resolved.parents, f"mesh escaped exact source repository: {resolved}")
         meshes[link_name] = {
             "resource": filename,
             "relative_to_package_share": relative,
+            "install_entry_path": str(install_entry),
+            "install_entry_is_symlink": install_entry.is_symlink(),
             "resolved_path": str(resolved),
+            "expected_source_path": str(expected_source),
+            "resolved_to_exact_source_path": True,
             "scale": scale,
             "size_bytes": resolved.stat().st_size,
             "sha256": sha256(resolved),
         }
 
-    commit = git(source_repo, "rev-parse", "HEAD")
-    require(commit == args.expected_source_commit, "external source commit mismatch")
-    status = git(source_repo, "status", "--porcelain")
-    require(status == "", "source repository is dirty")
-    remote = git(source_repo, "remote", "get-url", "origin")
-    require("ROBOTIS-JAPAN-GIT/turtlebot3_lime" in remote, "unexpected source repository origin")
     payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "phase": "RUBIK-PREGRASP-CORRECTED-FIXTURE-GEOMETRIC-RELEVANCE-MESH-PROVENANCE",
         "source_ref": args.source_ref,
         "passed": True,
@@ -103,7 +124,8 @@ def main() -> int:
             "path": str(urdf_path.resolve()),
             "sha256": sha256(urdf_path),
         },
-        "package_share": str(package_share),
+        "package_share_install_path": str(package_share_lexical),
+        "symlink_install_source_binding_required": True,
         "meshes": meshes,
         "safety": {
             "read_only_filesystem_inspection": True,
