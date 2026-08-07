@@ -100,7 +100,7 @@ jobs:
             -v "$PWD/artifacts:/artifacts" \
             lime-tidyup-grasp-relevance:${EXACT_HEAD_SHA} \
             bash -lc '
-              set -euo pipefail
+              set -eo pipefail
               source /opt/ros/humble/setup.bash
               source /project/lib_ws/install/setup.bash
               source /root/turtlebot3_ws/install/setup.bash
