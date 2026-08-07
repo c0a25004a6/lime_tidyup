@@ -36,6 +36,10 @@ add_executable(rubiks_relevance_candidate_batch_preflight src/rubiks_relevance_c
 target_compile_features(rubiks_relevance_candidate_batch_preflight PUBLIC cxx_std_17)
 ament_target_dependencies(rubiks_relevance_candidate_batch_preflight geometric_shapes moveit_core moveit_ros_planning srdfdom urdf)
 
+add_executable(rubiks_corrected_fixture_gripper_sweep_preflight src/rubiks_corrected_fixture_gripper_sweep_preflight.cpp)
+target_compile_features(rubiks_corrected_fixture_gripper_sweep_preflight PUBLIC cxx_std_17)
+ament_target_dependencies(rubiks_corrected_fixture_gripper_sweep_preflight geometric_shapes moveit_core moveit_ros_planning srdfdom urdf)
+
 install(TARGETS
   rubiks_self_collision_preflight
   rubiks_ground_plane_clearance_preflight
@@ -43,6 +47,7 @@ install(TARGETS
   rubiks_fixture_placement_offline_preflight
   rubiks_fixture_alignment_search_preflight
   rubiks_relevance_candidate_batch_preflight
+  rubiks_corrected_fixture_gripper_sweep_preflight
   DESTINATION lib/${PROJECT_NAME}
 )
 
