@@ -1,0 +1,164 @@
+name: Rubik corrected fixture offline gripper sweep
+
+on:
+  pull_request:
+    paths:
+      - "bin/summarize_rubiks_corrected_fixture_gripper_sweep.py"
+      - "project/rubiks_self_collision_ws/**"
+      - ".github/workflows/rubiks-pregrasp-corrected-fixture-gripper-sweep.yml"
+      - "doc/rubiks_pregrasp_corrected_fixture_gripper_sweep.md"
+      - "Dockerfile"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: rubiks-corrected-fixture-gripper-sweep-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  offline-gripper-sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PR26_ARTIFACT_ID: "8985452396"
+      PR26_ARTIFACT_SHA256: 8bf83186af7f96a245045b681952fcef38db081daf9d6f47345c404e11937156
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXACT_HEAD_SHA }}
+
+      - name: Validate exact checkout and offline implementation boundary
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
+          python3 -m py_compile bin/summarize_rubiks_corrected_fixture_gripper_sweep.py
+          python3 - <<'PY'
+          from pathlib import Path
+          checker = Path('project/rubiks_self_collision_ws/src/rubiks_self_collision_preflight/src/rubiks_corrected_fixture_gripper_sweep_preflight.cpp').read_text()
+          summary = Path('bin/summarize_rubiks_corrected_fixture_gripper_sweep.py').read_text()
+          cmake = Path('project/rubiks_self_collision_ws/src/rubiks_self_collision_preflight/CMakeLists.txt').read_text()
+          for token in ('SWEEP_STEP_M = 0.00001', 'DUAL_FINGER_CUBE', 'ground_plane', 'gripper_left_link|rubiks_cube', 'BLOCKED_NO_COLLISION_FREE_OPENING_STATE'):
+              if token not in checker:
+                  raise SystemExit(f'checker lacks {token}')
+          for token in ('OFFLINE_GRIPPER_SWEEP_OPEN_TO_DUAL_CONTACT_PATH_FOUND', 'sampled_gripper_positions_only', 'PR26_SOURCE'):
+              if token not in summary:
+                  raise SystemExit(f'summary lacks {token}')
+          if 'rubiks_corrected_fixture_gripper_sweep_preflight' not in cmake:
+              raise SystemExit('gripper sweep target is not installed')
+          for forbidden in ('ActionClient', 'MoveGroupInterface', 'FollowJointTrajectory', 'GripperCommand'):
+              if forbidden in checker:
+                  raise SystemExit(f'checker contains command path: {forbidden}')
+          PY
+
+      - name: Download accepted PR26 evidence
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/pr26
+          curl --fail --location --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PR26_ARTIFACT_ID}/zip" \
+            -o artifacts/pr26.zip
+          printf '%s  %s\n' "${PR26_ARTIFACT_SHA256}" artifacts/pr26.zip | sha256sum --check --strict
+          unzip -q artifacts/pr26.zip -d artifacts/pr26
+          test -s artifacts/pr26/rubiks_grasp_relevance_constrained_search_summary.json
+          test -s artifacts/pr26/pr23/accepted/turtlebot3_lime_fixture_current.urdf
+          test -s artifacts/pr26/pr23/accepted/turtlebot3_lime_fixture_current.srdf
+          test -s artifacts/pr26/pr23/accepted/pregrasp/rubiks_pregrasp_gripper_ground_states.tsv
+          test -s artifacts/pr26/pr23/accepted/rubiks_pregrasp_fixture_contract.tsv
+
+      - name: Build exact-head Lime image
+        run: docker build -t lime-tidyup-gripper-sweep:${EXACT_HEAD_SHA} .
+
+      - name: Run offline gripper sweep
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -e SOURCE_REF="${EXACT_HEAD_SHA}" \
+            -v "$PWD/artifacts:/artifacts" \
+            lime-tidyup-gripper-sweep:${EXACT_HEAD_SHA} \
+            bash -lc '
+              set -eo pipefail
+              source /opt/ros/humble/setup.bash
+              source /project/lib_ws/install/setup.bash
+              source /root/turtlebot3_ws/install/setup.bash
+
+              colcon build \
+                --merge-install \
+                --base-paths /project/rubiks_self_collision_ws/src \
+                --build-base /tmp/rubiks_gripper_sweep_build \
+                --install-base /tmp/rubiks_gripper_sweep_install \
+                --cmake-args -DCMAKE_BUILD_TYPE=Release \
+                --event-handlers console_direct+
+              source /tmp/rubiks_gripper_sweep_install/setup.bash
+
+              /tmp/rubiks_gripper_sweep_install/lib/rubiks_self_collision_preflight/rubiks_corrected_fixture_gripper_sweep_preflight \
+                /artifacts/pr26/pr23/accepted/turtlebot3_lime_fixture_current.urdf \
+                /artifacts/pr26/pr23/accepted/turtlebot3_lime_fixture_current.srdf \
+                /artifacts/pr26/pr23/accepted/pregrasp/rubiks_pregrasp_gripper_ground_states.tsv \
+                /artifacts/pr26/pr23/accepted/rubiks_pregrasp_fixture_contract.tsv \
+                0.06325 0 0.01225 \
+                /artifacts/rubiks_corrected_fixture_gripper_sweep_results.tsv
+
+              python3 /root/bin/summarize_rubiks_corrected_fixture_gripper_sweep.py \
+                --pr26-summary /artifacts/pr26/rubiks_grasp_relevance_constrained_search_summary.json \
+                --results /artifacts/rubiks_corrected_fixture_gripper_sweep_results.tsv \
+                --urdf /artifacts/pr26/pr23/accepted/turtlebot3_lime_fixture_current.urdf \
+                --srdf /artifacts/pr26/pr23/accepted/turtlebot3_lime_fixture_current.srdf \
+                --states /artifacts/pr26/pr23/accepted/pregrasp/rubiks_pregrasp_gripper_ground_states.tsv \
+                --fixture /artifacts/pr26/pr23/accepted/rubiks_pregrasp_fixture_contract.tsv \
+                --output /artifacts/rubiks_corrected_fixture_gripper_sweep_summary.json \
+                --manifest /artifacts/rubiks_corrected_fixture_gripper_sweep_evidence.manifest.json \
+                --source-ref "${SOURCE_REF}"
+            ' >artifacts/gripper_sweep.stdout.log \
+              2>artifacts/gripper_sweep.stderr.log
+
+      - name: Validate exact-head sweep evidence
+        run: |
+          set -euo pipefail
+          test -s artifacts/rubiks_corrected_fixture_gripper_sweep_summary.json
+          test -s artifacts/rubiks_corrected_fixture_gripper_sweep_evidence.manifest.json
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path('artifacts')
+          summary = json.loads((root / 'rubiks_corrected_fixture_gripper_sweep_summary.json').read_text())
+          manifest = json.loads((root / 'rubiks_corrected_fixture_gripper_sweep_evidence.manifest.json').read_text())
+          def req(value, message):
+              if not value:
+                  raise SystemExit(message)
+          req(summary.get('audit_passed') is True and summary.get('errors') == [], 'sweep audit failed')
+          req(summary.get('source_ref') == os.environ['EXACT_HEAD_SHA'], 'summary source mismatch')
+          req(summary.get('selected_translation_link7_m') == [0.06325, 0.0, 0.01225], 'selected translation mismatch')
+          req(summary.get('sweep', {}).get('accepted_state_count') == 2802, 'accepted state count mismatch')
+          req(summary.get('sweep', {}).get('step_m') == 0.00001, 'sweep step mismatch')
+          req(summary.get('decision') in (
+              'OFFLINE_GRIPPER_SWEEP_OPEN_TO_DUAL_CONTACT_PATH_FOUND',
+              'BLOCKED_NO_COLLISION_FREE_OPENING_STATE',
+              'BLOCKED_FORBIDDEN_COLLISION_BEFORE_DUAL_CONTACT',
+              'BLOCKED_NO_DUAL_FINGER_CUBE_CONTACT_IN_LIMITS',
+          ), 'unexpected sweep decision')
+          if summary.get('open_to_dual_contact_path_found'):
+              req(summary.get('sweep', {}).get('forbidden_before_dual') is False, 'positive path contains forbidden collision')
+          safety = summary.get('safety', {})
+          for key in ('gazebo_started','ros_node_created','object_spawned','controller_loaded','planning_request_created','trajectory_instantiated','command_sent','attachment_used','physical_hardware_used','production_runtime_modified'):
+              req(safety.get(key) is False, f'{key} must remain false')
+          req(manifest.get('source_ref') == os.environ['EXACT_HEAD_SHA'], 'manifest source mismatch')
+          req(manifest.get('decision') == summary.get('decision'), 'manifest decision mismatch')
+          print(json.dumps(summary, indent=2, sort_keys=True))
+          PY
+
+      - name: Upload gripper sweep evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-pregrasp-corrected-fixture-gripper-sweep-evidence
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
