@@ -236,7 +236,7 @@ int main(int argc, char** argv)
 {
   try
   {
-    if (argc != 8)
+    if (argc != 9)
       throw std::runtime_error("usage: gripper_sweep URDF SRDF STATES FIXTURE DX DY DZ OUTPUT");
 
     const auto urdf_model = urdf::parseURDF(read_file(argv[1]));
@@ -323,7 +323,7 @@ int main(int argc, char** argv)
     };
     const auto values = sweep_values(lower, upper);
 
-    std::ofstream output(argv[argc - 1]);
+    std::ofstream output(argv[8]);
     if (!output)
       throw std::runtime_error("cannot open output");
     output << std::setprecision(17);
@@ -369,8 +369,8 @@ int main(int argc, char** argv)
         Eigen::Isometry3d::Identity(), request);
       const auto ground_pairs = contact_pairs(ground_result);
 
-      bool left_contact = cube_pairs.count("gripper_left_link|rubiks_cube") != 0;
-      bool right_contact = cube_pairs.count("gripper_right_link|rubiks_cube") != 0;
+      const bool left_contact = cube_pairs.count("gripper_left_link|rubiks_cube") != 0;
+      const bool right_contact = cube_pairs.count("gripper_right_link|rubiks_cube") != 0;
       bool forbidden_cube = false;
       for (const auto& pair : cube_pairs)
         if (allowed_cube_pairs.count(pair) == 0)
