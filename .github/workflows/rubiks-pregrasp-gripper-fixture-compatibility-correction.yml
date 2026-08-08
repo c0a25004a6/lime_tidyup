@@ -22,7 +22,10 @@ concurrency:
 
 jobs:
   local-x-correction:
-    runs-on: ubuntu-latest
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
     timeout-minutes: 120
     env:
       EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -49,7 +52,7 @@ jobs:
           summary = Path('bin/summarize_rubiks_gripper_fixture_x_compatibility.py').read_text()
           sweep = Path('project/rubiks_self_collision_ws/src/rubiks_self_collision_preflight/src/rubiks_corrected_fixture_gripper_sweep_preflight.cpp').read_text()
           batch = Path('project/rubiks_self_collision_ws/src/rubiks_self_collision_preflight/src/rubiks_relevance_candidate_batch_preflight.cpp').read_text()
-          for token in ('STEP_M = 0.00025', 'RADIUS_STEPS = 8', 'axis": "X"'):
+          for token in ('STEP_M = 0.00025', 'RADIUS_STEPS = 8', 'axis\": \"X\"'):
               if token not in generator:
                   raise SystemExit(f'generator lacks {token}')
           for token in ('OFFLINE_GRIPPER_SWEEP_OPEN_TO_DUAL_CONTACT_PATH_FOUND', 'shifted_fixture', 'compatible_candidates'):
