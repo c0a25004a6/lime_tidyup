@@ -91,6 +91,21 @@ jobs:
       - name: Run local X compatibility correction
         run: |
           set -euo pipefail
+          report_failure() {
+            rc=$?
+            trap - EXIT
+            if (( rc != 0 )); then
+              echo "::group::fixture compatibility stderr"
+              cat artifacts/fixture_compatibility.stderr.log || true
+              echo "::endgroup::"
+              echo "::group::fixture compatibility stdout (tail)"
+              tail -n 300 artifacts/fixture_compatibility.stdout.log || true
+              echo "::endgroup::"
+            fi
+            exit "$rc"
+          }
+          trap report_failure EXIT
+
           docker run --rm \
             -e SOURCE_REF="${EXACT_HEAD_SHA}" \
             -v "$PWD/artifacts:/artifacts" \
@@ -151,6 +166,8 @@ jobs:
               python3 /root/bin/summarize_rubiks_gripper_fixture_x_compatibility.py "${summary_args[@]}"
             ' >artifacts/fixture_compatibility.stdout.log \
               2>artifacts/fixture_compatibility.stderr.log
+
+          trap - EXIT
 
       - name: Validate exact-head compatibility evidence
         run: |
