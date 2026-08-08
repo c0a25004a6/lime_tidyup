@@ -22,10 +22,7 @@ concurrency:
 
 jobs:
   local-x-correction:
-    runs-on:
-      - self-hosted
-      - linux
-      - x64
+    runs-on: self-hosted
     timeout-minutes: 120
     env:
       EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
