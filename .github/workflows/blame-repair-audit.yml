@@ -1,9 +1,6 @@
 name: blame-repair-audit
 
 on:
-  push:
-    branches:
-      - history-repair/blame-audit
   pull_request:
     branches:
       - main
@@ -27,7 +24,7 @@ jobs:
           git remote add lime-upstream https://github.com/momoiorg-repository/LimeSimulDemo.git
           git fetch --no-tags lime-upstream main
 
-      - name: Audit collapsed root and build isolated candidate
+      - name: Rank ancestry, build isolated candidate and verify blame
         shell: bash
         run: |
           set -euo pipefail
@@ -36,27 +33,39 @@ jobs:
           ROOT_TREE=$(git rev-parse "${ROOT}^{tree}")
           UPSTREAM_HEAD=$(git rev-parse refs/remotes/lime-upstream/main)
           MATCH=""
-          BEST=""
-          BEST_COUNT=999999
           : > upstream-ranking.tsv
 
+          # Ranking key is deliberately content-first:
+          #   1) number of changed paths
+          #   2) changed text lines (adds + deletes; binary paths excluded here)
+          #   3) binary/unscored path count
+          #   4) newer upstream timestamp as a final deterministic tie-break
           while read -r C; do
             TREE=$(git rev-parse "${C}^{tree}")
-            COUNT=$(git diff --name-only "$C" "$ROOT" | wc -l | tr -d ' ')
+            PATHS=$(git diff --name-only "$C" "$ROOT" | wc -l | tr -d ' ')
+            NUMSTAT=$(git diff --numstat "$C" "$ROOT")
+            TEXT_LINES=$(printf '%s\n' "$NUMSTAT" | awk '$1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ {s += $1 + $2} END {print s+0}')
+            BINARY=$(printf '%s\n' "$NUMSTAT" | awk '$1 == "-" || $2 == "-" {n++} END {print n+0}')
+            EPOCH=$(git show -s --format='%at' "$C")
             DATE=$(git show -s --format='%aI' "$C")
             AUTHOR=$(git show -s --format='%an' "$C" | tr '\t' ' ')
             SUBJECT=$(git show -s --format='%s' "$C" | tr '\t' ' ')
-            printf '%s\t%s\t%s\t%s\t%s\n' "$COUNT" "$C" "$DATE" "$AUTHOR" "$SUBJECT" >> upstream-ranking.tsv
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$PATHS" "$TEXT_LINES" "$BINARY" "$EPOCH" "$C" "$DATE" "$AUTHOR" "$SUBJECT" >> upstream-ranking.tsv
             if [ "$TREE" = "$ROOT_TREE" ] && [ -z "$MATCH" ]; then
               MATCH="$C"
             fi
-            if [ "$COUNT" -lt "$BEST_COUNT" ]; then
-              BEST_COUNT="$COUNT"
-              BEST="$C"
-            fi
           done < <(git rev-list refs/remotes/lime-upstream/main)
 
-          sort -n -k1,1 upstream-ranking.tsv > upstream-ranking.sorted.tsv
+          # Ascending paths/line-delta/binary count; for exact ties prefer newer source.
+          sort -t $'\t' -k1,1n -k2,2n -k3,3n -k4,4nr upstream-ranking.tsv > upstream-ranking.sorted.tsv
+          BEST=$(head -1 upstream-ranking.sorted.tsv | cut -f5)
+          BEST_PATHS=$(head -1 upstream-ranking.sorted.tsv | cut -f1)
+          BEST_LINES=$(head -1 upstream-ranking.sorted.tsv | cut -f2)
+          BEST_BINARY=$(head -1 upstream-ranking.sorted.tsv | cut -f3)
+
+          BASE="${MATCH:-$BEST}"
+          MODE=ranked-closest
+          if [ -n "$MATCH" ]; then MODE=exact; fi
 
           {
             echo "current_main=$(git rev-parse origin/main)"
@@ -65,36 +74,28 @@ jobs:
             echo "upstream_head=$UPSTREAM_HEAD"
             echo "upstream_commit_count=$(git rev-list --count refs/remotes/lime-upstream/main)"
             echo "exact_tree_match=${MATCH:-none}"
-            echo "closest_upstream_commit=$BEST"
-            echo "closest_changed_files=$BEST_COUNT"
+            echo "ranked_base=$BASE"
+            echo "ranked_changed_paths=$BEST_PATHS"
+            echo "ranked_text_line_delta=$BEST_LINES"
+            echo "ranked_binary_paths=$BEST_BINARY"
             echo
             echo '=== top 10 upstream ancestry candidates ==='
+            echo -e 'paths\ttext_line_delta\tbinary_paths\tepoch\tsha\tdate\tauthor\tsubject'
             head -10 upstream-ranking.sorted.tsv
             echo
-            echo '=== current root ==='
+            echo '=== current collapsed root ==='
             git show -s --format='sha=%H%nauthor=%an <%ae>%nauthor_date=%aI%ncommitter=%cn <%ce>%ncommitter_date=%cI%nsubject=%s' "$ROOT"
             echo
-            echo '=== selected upstream base ==='
-            git show -s --format='sha=%H%nauthor=%an <%ae>%nauthor_date=%aI%ncommitter=%cn <%ce>%ncommitter_date=%cI%nsubject=%s' "${MATCH:-$BEST}"
-            echo
-            echo '=== selected base -> collapsed root paths ==='
-            git diff --name-status "${MATCH:-$BEST}" "$ROOT" | head -250
-            echo
-            echo '=== current history oldest first ==='
-            git log --reverse --format='%H%x09%an%x09%ae%x09%aI%x09%s' origin/main
+            echo '=== selected original base ==='
+            git show -s --format='sha=%H%nauthor=%an <%ae>%nauthor_date=%aI%ncommitter=%cn <%ce>%ncommitter_date=%cI%nsubject=%s' "$BASE"
           } | tee blame-repair-audit.txt
 
-          # Keep the original upstream history as exact Git objects on an isolated ref.
+          # Preserve the exact original objects in this repository, isolated from main.
           git push origin refs/remotes/lime-upstream/main:refs/heads/history-repair/upstream-main --force
 
-          BASE="${MATCH:-$BEST}"
-          MODE=closest
-          if [ -n "$MATCH" ]; then MODE=exact; fi
-
           # Recreate only the collapsed local root as a child of the selected original
-          # upstream commit, preserving its complete tree, message, author and dates.
-          # This attributes unchanged upstream lines back to their original commits while
-          # keeping all local additions/modifications in the replacement root commit.
+          # commit. Its complete tree, message, author/committer identity and timestamps
+          # are preserved. Later local commits are replayed unchanged in content.
           export GIT_AUTHOR_NAME="$(git show -s --format='%an' "$ROOT")"
           export GIT_AUTHOR_EMAIL="$(git show -s --format='%ae' "$ROOT")"
           export GIT_AUTHOR_DATE="$(git show -s --format='%aI' "$ROOT")"
@@ -110,9 +111,66 @@ jobs:
             git cherry-pick "$C"
           done < <(git rev-list --reverse "${ROOT}..origin/main")
 
-          if ! git diff --quiet origin/main history-repair/candidate-closest; then
+          CURRENT_TREE=$(git rev-parse 'origin/main^{tree}')
+          CANDIDATE_TREE=$(git rev-parse 'history-repair/candidate-closest^{tree}')
+          if [ "$CURRENT_TREE" != "$CANDIDATE_TREE" ] || ! git diff --quiet origin/main history-repair/candidate-closest; then
             echo 'Candidate final tree differs from current main; refusing to publish.' >&2
             git diff --stat origin/main history-repair/candidate-closest >&2 || true
+            exit 1
+          fi
+
+          # Select up to five upstream text files whose blob is unchanged by the collapsed
+          # root. These are ideal Blame witnesses: current history attributes them to the
+          # collapsed root, while the repaired candidate must trace them into upstream.
+          git diff --name-only "$BASE" "$ROOT" > changed-from-base.txt
+          : > blame-witnesses.txt
+          while read -r P; do
+            [ -n "$P" ] || continue
+            grep -Fxq "$P" changed-from-base.txt && continue
+            case "$P" in
+              *.md|*.txt|*.py|*.cpp|*.c|*.h|*.hpp|*.xml|*.yaml|*.yml|*.json|*.sh|*.launch|*.urdf|*.xacro|Dockerfile|*/Dockerfile)
+                if git cat-file -e "$BASE:$P" 2>/dev/null && git cat-file -e "$ROOT:$P" 2>/dev/null; then
+                  SIZE=$(git cat-file -s "$ROOT:$P")
+                  if [ "$SIZE" -gt 0 ] && [ "$SIZE" -le 200000 ]; then
+                    printf '%s\n' "$P" >> blame-witnesses.txt
+                  fi
+                fi
+                ;;
+            esac
+            [ "$(wc -l < blame-witnesses.txt)" -ge 5 ] && break
+          done < <(git ls-tree -r --name-only "$BASE")
+
+          WITNESS_COUNT=$(wc -l < blame-witnesses.txt | tr -d ' ')
+          if [ "$WITNESS_COUNT" -eq 0 ]; then
+            echo 'No unchanged text witness files were found; refusing to claim Blame restoration.' >&2
+            exit 1
+          fi
+
+          : > blame-verification.txt
+          RESTORED_WITNESSES=0
+          while read -r P; do
+            [ -n "$P" ] || continue
+            {
+              echo "=== $P ==="
+              echo '-- current main authors --'
+              git blame --line-porcelain origin/main -- "$P" | sed -n 's/^author //p' | sort | uniq -c
+              echo '-- candidate authors --'
+              git blame --line-porcelain history-repair/candidate-closest -- "$P" | sed -n 's/^author //p' | sort | uniq -c
+              echo '-- upstream base authors --'
+              git blame --line-porcelain "$BASE" -- "$P" | sed -n 's/^author //p' | sort | uniq -c
+              echo
+            } >> blame-verification.txt
+
+            CURRENT_NONLOCAL=$(git blame --line-porcelain origin/main -- "$P" | sed -n 's/^author //p' | grep -Ev '^(Yuu Akaoka|nekomario28)$' | wc -l | tr -d ' ')
+            CANDIDATE_NONLOCAL=$(git blame --line-porcelain history-repair/candidate-closest -- "$P" | sed -n 's/^author //p' | grep -Ev '^(Yuu Akaoka|nekomario28)$' | wc -l | tr -d ' ')
+            if [ "$CANDIDATE_NONLOCAL" -gt "$CURRENT_NONLOCAL" ]; then
+              RESTORED_WITNESSES=$((RESTORED_WITNESSES + 1))
+            fi
+          done < blame-witnesses.txt
+
+          if [ "$RESTORED_WITNESSES" -eq 0 ]; then
+            echo 'Candidate did not improve original-author Blame on any witness; refusing to publish.' >&2
+            cat blame-verification.txt >&2
             exit 1
           fi
 
@@ -123,12 +181,16 @@ jobs:
             echo "candidate_base=$BASE"
             echo "replacement_root=$NEW_ROOT"
             echo "candidate_head=$(git rev-parse history-repair/candidate-closest)"
-            echo "candidate_final_tree=$(git rev-parse 'history-repair/candidate-closest^{tree}')"
-            echo "current_final_tree=$(git rev-parse 'origin/main^{tree}')"
+            echo "candidate_final_tree=$CANDIDATE_TREE"
+            echo "current_final_tree=$CURRENT_TREE"
             echo "final_tree_identical=true"
+            echo "blame_witness_count=$WITNESS_COUNT"
+            echo "blame_restored_witnesses=$RESTORED_WITNESSES"
             echo
-            echo '=== candidate oldest local commits ==='
-            git log --reverse --format='%H%x09%P%x09%an%x09%ae%x09%aI%x09%s' "${BASE}..history-repair/candidate-closest" | head -10
+            echo '=== blame witnesses ==='
+            cat blame-witnesses.txt
+            echo
+            cat blame-verification.txt
           } | tee -a blame-repair-audit.txt
 
           git push origin history-repair/candidate-closest:refs/heads/history-repair/candidate-closest --force
@@ -140,4 +202,6 @@ jobs:
           path: |
             blame-repair-audit.txt
             upstream-ranking.sorted.tsv
+            blame-witnesses.txt
+            blame-verification.txt
           if-no-files-found: error
