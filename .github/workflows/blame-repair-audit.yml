@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - history-repair/blame-audit
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
@@ -77,7 +80,6 @@ jobs:
             git log --reverse --format='%H%x09%an%x09%ae%x09%aI%x09%s' origin/main
           } | tee blame-repair-audit.txt
 
-          # Preserve the exact upstream object history in this repository on an isolated ref.
           git push origin refs/remotes/lime-upstream/main:refs/heads/history-repair/upstream-main --force
 
           if [ -z "$MATCH" ]; then
@@ -85,9 +87,6 @@ jobs:
             exit 0
           fi
 
-          # Root tree exactly equals an original upstream commit. Drop only the collapsed
-          # root commit and replay every later local commit on top of the exact upstream
-          # history. main is never touched here.
           git checkout -B history-repair/candidate origin/main
           git rebase --rebase-merges --onto "$MATCH" "$ROOT" history-repair/candidate
 
