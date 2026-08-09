@@ -1,0 +1,109 @@
+name: blame-repair-audit
+
+on:
+  push:
+    branches:
+      - history-repair/blame-audit
+
+permissions:
+  contents: write
+
+jobs:
+  audit-and-build-candidate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full current history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch original LimeSimulDemo history
+        shell: bash
+        run: |
+          set -euo pipefail
+          git remote add lime-upstream https://github.com/momoiorg-repository/LimeSimulDemo.git
+          git fetch --no-tags lime-upstream main
+
+      - name: Audit collapsed root and build exact candidate when safe
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          ROOT=$(git rev-list --max-parents=0 origin/main | head -1)
+          ROOT_TREE=$(git rev-parse "${ROOT}^{tree}")
+          UPSTREAM_HEAD=$(git rev-parse refs/remotes/lime-upstream/main)
+          MATCH=""
+          BEST=""
+          BEST_COUNT=999999
+
+          while read -r C; do
+            TREE=$(git rev-parse "${C}^{tree}")
+            if [ "$TREE" = "$ROOT_TREE" ]; then
+              MATCH="$C"
+              break
+            fi
+            COUNT=$(git diff --name-only "$C" "$ROOT" | wc -l | tr -d ' ')
+            if [ "$COUNT" -lt "$BEST_COUNT" ]; then
+              BEST_COUNT="$COUNT"
+              BEST="$C"
+            fi
+          done < <(git rev-list refs/remotes/lime-upstream/main)
+
+          {
+            echo "current_main=$(git rev-parse origin/main)"
+            echo "current_root=$ROOT"
+            echo "current_root_tree=$ROOT_TREE"
+            echo "upstream_head=$UPSTREAM_HEAD"
+            echo "upstream_commit_count=$(git rev-list --count refs/remotes/lime-upstream/main)"
+            echo "exact_tree_match=${MATCH:-none}"
+            echo "closest_upstream_commit=${BEST:-none}"
+            echo "closest_changed_files=$BEST_COUNT"
+            echo
+            echo '=== current root ==='
+            git show -s --format='sha=%H%nauthor=%an <%ae>%nauthor_date=%aI%ncommitter=%cn <%ce>%ncommitter_date=%cI%nsubject=%s' "$ROOT"
+            echo
+            if [ -n "$MATCH" ]; then
+              echo '=== exact upstream match ==='
+              git show -s --format='sha=%H%nauthor=%an <%ae>%nauthor_date=%aI%ncommitter=%cn <%ce>%ncommitter_date=%cI%nsubject=%s' "$MATCH"
+            else
+              echo '=== closest upstream candidate ==='
+              git show -s --format='sha=%H%nauthor=%an <%ae>%nauthor_date=%aI%ncommitter=%cn <%ce>%ncommitter_date=%cI%nsubject=%s' "$BEST"
+              echo
+              echo '=== root vs closest paths ==='
+              git diff --name-status "$BEST" "$ROOT" | head -200
+            fi
+            echo
+            echo '=== current history oldest first ==='
+            git log --reverse --format='%H%x09%an%x09%ae%x09%aI%x09%s' origin/main
+          } | tee blame-repair-audit.txt
+
+          # Preserve the exact upstream object history in this repository on an isolated ref.
+          git push origin refs/remotes/lime-upstream/main:refs/heads/history-repair/upstream-main --force
+
+          if [ -z "$MATCH" ]; then
+            echo 'No exact root-tree match; refusing to rewrite ancestry automatically.'
+            exit 0
+          fi
+
+          # Root tree exactly equals an original upstream commit. Drop only the collapsed
+          # root commit and replay every later local commit on top of the exact upstream
+          # history. main is never touched here.
+          git checkout -B history-repair/candidate origin/main
+          git rebase --rebase-merges --onto "$MATCH" "$ROOT" history-repair/candidate
+
+          if ! git diff --quiet origin/main history-repair/candidate; then
+            echo 'Candidate final tree differs from current main; refusing to publish.' >&2
+            git diff --stat origin/main history-repair/candidate >&2 || true
+            exit 1
+          fi
+
+          echo "candidate_head=$(git rev-parse history-repair/candidate)" | tee -a blame-repair-audit.txt
+          echo "candidate_base_match=$MATCH" | tee -a blame-repair-audit.txt
+          git push origin history-repair/candidate:refs/heads/history-repair/candidate --force
+
+      - name: Upload ancestry audit
+        uses: actions/upload-artifact@v4
+        with:
+          name: blame-repair-audit
+          path: blame-repair-audit.txt
+          if-no-files-found: error
