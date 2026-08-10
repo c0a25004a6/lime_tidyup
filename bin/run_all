@@ -1,7 +1,34 @@
 source ~/turtlebot3_ws/install/setup.bash
 source ~/roscommon/ws_moveit2/install/setup.bash
-ros2 launch turtlebot3_lime_bringup gazebo.launch.py x_pose:=0 y_pose:=0 world:=/project/resource/sim_house.world &
+
+PIDS=()
+cleanup() {
+  for pid in "${PIDS[@]}"; do
+    kill "$pid" 2>/dev/null || true
+  done
+}
+trap cleanup EXIT INT TERM
+
+ros2 launch turtlebot3_lime_bringup gazebo.launch.py \
+  x_pose:=0 y_pose:=0 world:=/project/resource/sim_house.world &
+PIDS+=("$!")
 sleep 5
+
 ros2 launch turtlebot3_lime_moveit_config servo.launch.py use_sim:=true &
+PIDS+=("$!")
 sleep 1
-ros2 launch turtlebot3_lime_bringup moveit_navigation_use_sim_time.launch.py map_yaml_file:=/project/resource/map/sim_house_map.yaml
+
+# Keep the same two-RViz + MoveIt layout as moveit_navigation_use_sim_time,
+# but launch Nav2 directly so resilient process-level respawn can be enabled.
+ros2 launch turtlebot3_lime_moveit_config moveit_rviz.launch.py &
+PIDS+=("$!")
+ros2 launch turtlebot3_lime_moveit_config move_group.launch.py use_sim:=true &
+PIDS+=("$!")
+
+python3 ~/bin/nav2_watchdog.py --startup-grace 25 --failure-threshold 3 --cooldown 30 &
+PIDS+=("$!")
+
+ros2 launch turtlebot3_lime_navigation2 navigation2_use_sim_time.launch.py \
+  map_yaml_file:=/project/resource/map/sim_house_map.yaml \
+  use_composition:=False \
+  use_respawn:=True
