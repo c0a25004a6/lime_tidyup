@@ -1,7 +1,7 @@
 source ~/turtlebot3_ws/install/setup.bash
 
 # Nav2 Humble can respawn individual servers only when composition is disabled.
-python3 ~/bin/nav2_watchdog.py --startup-grace 25 --failure-threshold 3 --cooldown 30 &
+python3 ~/bin/nav2_watchdog.py --startup-grace 45 --failure-threshold 3 --cooldown 60 &
 WATCHDOG_PID=$!
 trap 'kill "$WATCHDOG_PID" 2>/dev/null || true' EXIT INT TERM
 
