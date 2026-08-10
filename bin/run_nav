@@ -1,3 +1,11 @@
 source ~/turtlebot3_ws/install/setup.bash
-ros2 launch turtlebot3_lime_navigation2 navigation2.launch.py map_yaml_file:=/project/resource/map/sim_house_map.yaml
 
+# Nav2 Humble can respawn individual servers only when composition is disabled.
+python3 ~/bin/nav2_watchdog.py --startup-grace 25 --failure-threshold 3 --cooldown 30 &
+WATCHDOG_PID=$!
+trap 'kill "$WATCHDOG_PID" 2>/dev/null || true' EXIT INT TERM
+
+ros2 launch turtlebot3_lime_navigation2 navigation2.launch.py \
+  map_yaml_file:=/project/resource/map/sim_house_map.yaml \
+  use_composition:=False \
+  use_respawn:=True
