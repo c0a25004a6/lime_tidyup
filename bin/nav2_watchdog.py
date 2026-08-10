@@ -20,9 +20,12 @@ from rclpy.action import ActionClient
 from rclpy.node import Node
 
 
-DEFAULT_NODES = (
+LOCALIZATION_NODES = (
     "map_server",
     "amcl",
+)
+
+NAVIGATION_NODES = (
     "controller_server",
     "smoother_server",
     "planner_server",
@@ -32,10 +35,14 @@ DEFAULT_NODES = (
     "velocity_smoother",
 )
 
-DEFAULT_MANAGERS = (
-    "/lifecycle_manager_localization/manage_nodes",
-    "/lifecycle_manager_navigation/manage_nodes",
-)
+DEFAULT_NODES = LOCALIZATION_NODES + NAVIGATION_NODES
+LOCALIZATION_MANAGER = "/lifecycle_manager_localization/manage_nodes"
+NAVIGATION_MANAGER = "/lifecycle_manager_navigation/manage_nodes"
+DEFAULT_MANAGERS = (LOCALIZATION_MANAGER, NAVIGATION_MANAGER)
+
+# nav2_msgs/srv/ManageLifecycleNodes command constants.
+STARTUP = 0
+RESET = 3
 
 
 class Nav2Watchdog(Node):
@@ -101,24 +108,51 @@ class Nav2Watchdog(Node):
         )
         return success
 
-    def recover(self) -> bool:
-        self.get_logger().warning("Nav2 unhealthy; stopping robot before recovery")
+    @staticmethod
+    def affected_managers(
+        states: Dict[str, Optional[int]], action_available: bool
+    ) -> Tuple[str, ...]:
+        localization_bad = any(
+            states.get(name) != State.PRIMARY_STATE_ACTIVE
+            for name in LOCALIZATION_NODES
+            if name in states
+        )
+        navigation_bad = any(
+            states.get(name) != State.PRIMARY_STATE_ACTIVE
+            for name in NAVIGATION_NODES
+            if name in states
+        ) or not action_available
+
+        # Navigation depends on localization, so recover both if localization is bad.
+        if localization_bad:
+            return (LOCALIZATION_MANAGER, NAVIGATION_MANAGER)
+        if navigation_bad:
+            return (NAVIGATION_MANAGER,)
+        return ()
+
+    def recover(
+        self, states: Dict[str, Optional[int]], action_available: bool
+    ) -> bool:
+        managers = self.affected_managers(states, action_available)
+        if not managers:
+            return True
+
+        self.get_logger().warning(
+            "Nav2 unhealthy; stopping robot before lifecycle recovery: "
+            + ", ".join(managers)
+        )
         self.stop_robot()
 
-        # Reset navigation first, then localization. Startup in dependency order.
+        # Reset dependants before dependencies, then start dependencies first.
         reset_ok = True
-        for service in reversed(tuple(self._manager_clients.keys())):
-            reset_ok = self._manage(
-                service, ManageLifecycleNodes.Request.RESET
-            ) and reset_ok
+        for service in reversed(managers):
+            reset_ok = self._manage(service, RESET) and reset_ok
 
         time.sleep(2.0)
 
         startup_ok = True
-        for service in self._manager_clients.keys():
-            startup_ok = self._manage(
-                service, ManageLifecycleNodes.Request.STARTUP
-            ) and startup_ok
+        for service in managers:
+            startup_ok = self._manage(service, STARTUP) and startup_ok
 
         return reset_ok and startup_ok
 
@@ -139,9 +173,9 @@ def _state_name(state_id: Optional[int]) -> str:
 def parse_args():
     parser = argparse.ArgumentParser(description="Watch and recover the Lime Nav2 stack")
     parser.add_argument("--interval", type=float, default=2.0)
-    parser.add_argument("--startup-grace", type=float, default=25.0)
+    parser.add_argument("--startup-grace", type=float, default=45.0)
     parser.add_argument("--failure-threshold", type=int, default=3)
-    parser.add_argument("--cooldown", type=float, default=30.0)
+    parser.add_argument("--cooldown", type=float, default=60.0)
     parser.add_argument("--recovery-grace", type=float, default=10.0)
     parser.add_argument(
         "--once", action="store_true", help="Check once and recover once if unhealthy"
@@ -192,7 +226,7 @@ def main() -> int:
 
             if should_recover:
                 last_recovery = now
-                node.recover()
+                node.recover(states, action_available)
                 failures = 0
                 time.sleep(args.recovery_grace)
                 if args.once:
