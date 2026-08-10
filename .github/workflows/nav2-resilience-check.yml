@@ -1,0 +1,27 @@
+name: Nav2 resilience checks
+
+on:
+  pull_request:
+    paths:
+      - 'bin/nav2_watchdog.py'
+      - 'bin/run_all'
+      - 'bin/run_nav'
+      - 'bin/run_navigation'
+      - '.github/workflows/nav2-resilience-check.yml'
+  workflow_dispatch:
+
+jobs:
+  static-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Compile watchdog
+        run: python3 -m py_compile bin/nav2_watchdog.py
+
+      - name: Check shell syntax
+        run: |
+          bash -n bin/run_all
+          bash -n bin/run_nav
+          bash -n bin/run_navigation
