@@ -25,7 +25,7 @@ PIDS+=("$!")
 ros2 launch turtlebot3_lime_moveit_config move_group.launch.py use_sim:=true &
 PIDS+=("$!")
 
-python3 ~/bin/nav2_watchdog.py --startup-grace 25 --failure-threshold 3 --cooldown 30 &
+python3 ~/bin/nav2_watchdog.py --startup-grace 45 --failure-threshold 3 --cooldown 60 &
 PIDS+=("$!")
 
 ros2 launch turtlebot3_lime_navigation2 navigation2_use_sim_time.launch.py \
