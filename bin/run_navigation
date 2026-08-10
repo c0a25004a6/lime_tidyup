@@ -1,1 +1,15 @@
-ros2 launch turtlebot3_lime_navigation2 navigation2_use_sim_time.launch.py map_yaml_file:=$1
+source ~/turtlebot3_ws/install/setup.bash
+
+if [ -z "$1" ]; then
+  echo "usage: run_navigation <map.yaml>" >&2
+  exit 2
+fi
+
+python3 ~/bin/nav2_watchdog.py --startup-grace 25 --failure-threshold 3 --cooldown 30 &
+WATCHDOG_PID=$!
+trap 'kill "$WATCHDOG_PID" 2>/dev/null || true' EXIT INT TERM
+
+ros2 launch turtlebot3_lime_navigation2 navigation2_use_sim_time.launch.py \
+  map_yaml_file:="$1" \
+  use_composition:=False \
+  use_respawn:=True
