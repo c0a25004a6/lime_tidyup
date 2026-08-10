@@ -5,7 +5,7 @@ if [ -z "$1" ]; then
   exit 2
 fi
 
-python3 ~/bin/nav2_watchdog.py --startup-grace 25 --failure-threshold 3 --cooldown 30 &
+python3 ~/bin/nav2_watchdog.py --startup-grace 45 --failure-threshold 3 --cooldown 60 &
 WATCHDOG_PID=$!
 trap 'kill "$WATCHDOG_PID" 2>/dev/null || true' EXIT INT TERM
 
