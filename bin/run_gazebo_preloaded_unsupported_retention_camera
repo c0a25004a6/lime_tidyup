@@ -109,9 +109,10 @@ for _ in $(seq 1 120); do
 done
 ros2_service_available '/controller_manager/list_controllers' || exit 5
 
-ros2 run controller_manager spawner joint_state_broadcaster --controller-manager /controller_manager >"${ARTIFACT_DIR}/camera_joint_state_broadcaster.spawner.log" 2>&1
-ros2 run controller_manager spawner arm_controller --controller-manager /controller_manager >"${ARTIFACT_DIR}/camera_arm_controller.spawner.log" 2>&1
-ros2 run controller_manager spawner gripper_controller --controller-manager /controller_manager >"${ARTIFACT_DIR}/camera_gripper_controller.spawner.log" 2>&1
+SPAWNER_TIMEOUT_ARGS=(--controller-manager /controller_manager --controller-manager-timeout 60 --service-call-timeout 60 --switch-timeout 60)
+ros2 run controller_manager spawner joint_state_broadcaster "${SPAWNER_TIMEOUT_ARGS[@]}" >"${ARTIFACT_DIR}/camera_joint_state_broadcaster.spawner.log" 2>&1
+ros2 run controller_manager spawner arm_controller "${SPAWNER_TIMEOUT_ARGS[@]}" >"${ARTIFACT_DIR}/camera_arm_controller.spawner.log" 2>&1
+ros2 run controller_manager spawner gripper_controller "${SPAWNER_TIMEOUT_ARGS[@]}" >"${ARTIFACT_DIR}/camera_gripper_controller.spawner.log" 2>&1
 for _ in $(seq 1 90); do
   if ros2_action_available '/arm_controller/follow_joint_trajectory' && ros2_action_available '/gripper_controller/gripper_cmd'; then break; fi
   sleep 1
