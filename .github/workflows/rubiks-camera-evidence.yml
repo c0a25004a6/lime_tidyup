@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'Dockerfile.rubiks-physics'
+      - 'bin/record_ros_compressed_frames.py'
       - 'bin/run_gazebo_preloaded_unsupported_retention_camera'
       - 'project/resource/rubiks_physics_observer_camera.sdf'
       - '.github/workflows/rubiks-camera-evidence.yml'
@@ -29,11 +30,12 @@ jobs:
         with:
           ref: ${{ env.EXACT_HEAD_SHA }}
 
-      - name: Validate native camera harness statically
+      - name: Validate compressed camera harness statically
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
           python3 -m py_compile \
+            bin/record_ros_compressed_frames.py \
             bin/run_rubiks_preloaded_unsupported_retention.py \
             bin/run_rubiks_unsupported_retention.py \
             bin/rubiks_contact_quality.py
@@ -48,16 +50,18 @@ jobs:
           assert 'libgazebo_ros_camera.so' in s
           assert '<width>640</width>' in s and '<height>480</height>' in s
           assert '<update_rate>30</update_rate>' in s
-          assert '<save enabled="true">' in s
-          assert '/artifacts/rubiks_preloaded_unsupported_retention_camera_frames' in s
           r=Path('bin/run_gazebo_preloaded_unsupported_retention_camera').read_text()
           assert 'gzserver --lockstep' in r
           assert '--max-effort 0.25' in r and '--unsupported-seconds 1.0' in r
           assert "! grep -q 'libgazebo_grasp_fix.so'" in r
           assert "! grep -q 'libgazebo_ros_link_attacher.so'" in r
-          assert 'GAZEBO_CLASSIC_CAMERA_NATIVE_SAVE' in r
+          assert 'record_ros_compressed_frames.py' in r
+          assert 'GAZEBO_ROS_CAMERA_COMPRESSED_JPEG' in r
           assert 'ffmpeg' in r and 'ffprobe' in r
-          assert 'record_ros_image_mp4.py' not in r
+          recorder=Path('bin/record_ros_compressed_frames.py').read_text()
+          assert 'CompressedImage' in recorder
+          assert 'frame_' in recorder
+          assert 'cv2' not in recorder
           PY
 
       - name: Download bound source evidence
@@ -101,7 +105,7 @@ jobs:
             'global_max_depth_limit_m':0.001,
             'unsupported_retention_seconds':1.0,
             'camera_evidence_required':True,
-            'camera_capture_source':'GAZEBO_CLASSIC_CAMERA_NATIVE_SAVE',
+            'camera_capture_source':'GAZEBO_ROS_CAMERA_COMPRESSED_JPEG',
             'camera_lockstep_required':True,
             'camera_expected_width':640,
             'camera_expected_height':480,
@@ -132,18 +136,21 @@ jobs:
           printf '%s\n' "${rc}" > artifacts/container.camera.exit_code.txt
           echo "container exit=${rc}; retention failure is expected, camera infrastructure failure is not"
 
-      - name: Validate native lockstep camera artifact
+      - name: Validate lockstep Gazebo video artifact
         if: always()
         run: |
           set -euo pipefail
           for f in \
             artifacts/rubiks_preloaded_unsupported_retention_camera.mp4 \
             artifacts/rubiks_preloaded_unsupported_retention_camera_closeup.mp4 \
+            artifacts/rubiks_preloaded_unsupported_retention_camera_capture.json \
             artifacts/rubiks_preloaded_unsupported_retention_camera_video.json \
             artifacts/rubiks_preloaded_unsupported_retention_camera_ffprobe.json \
             artifacts/rubiks_preloaded_unsupported_retention_camera_closeup_ffprobe.json \
             artifacts/rubiks_preloaded_unsupported_retention_camera_frame_count.txt \
-            artifacts/rubiks_preloaded_unsupported_retention_camera_topic.txt; do
+            artifacts/rubiks_preloaded_unsupported_retention_camera_topic.txt \
+            artifacts/rubiks_preloaded_unsupported_retention_camera_compressed_topic.txt \
+            artifacts/rubiks_preloaded_unsupported_retention_camera_recorder_exit_code.txt; do
             test -s "$f"
           done
           test -d artifacts/rubiks_preloaded_unsupported_retention_camera_keyframes
@@ -151,24 +158,36 @@ jobs:
           python3 - <<'PY'
           import json
           from pathlib import Path
+          c=json.loads(Path('artifacts/rubiks_preloaded_unsupported_retention_camera_capture.json').read_text())
           m=json.loads(Path('artifacts/rubiks_preloaded_unsupported_retention_camera_video.json').read_text())
           p=json.loads(Path('artifacts/rubiks_preloaded_unsupported_retention_camera_ffprobe.json').read_text())
           cp=json.loads(Path('artifacts/rubiks_preloaded_unsupported_retention_camera_closeup_ffprobe.json').read_text())
-          topic=Path('artifacts/rubiks_preloaded_unsupported_retention_camera_topic.txt').read_text().strip()
+          raw_topic=Path('artifacts/rubiks_preloaded_unsupported_retention_camera_topic.txt').read_text().strip()
+          compressed_topic=Path('artifacts/rubiks_preloaded_unsupported_retention_camera_compressed_topic.txt').read_text().strip()
           count=int(Path('artifacts/rubiks_preloaded_unsupported_retention_camera_frame_count.txt').read_text())
-          assert m['capture_source']=='GAZEBO_CLASSIC_CAMERA_NATIVE_SAVE', m
+          recorder_rc=int(Path('artifacts/rubiks_preloaded_unsupported_retention_camera_recorder_exit_code.txt').read_text())
+          assert recorder_rc==0
+          assert c['capture_source']=='GAZEBO_ROS_CAMERA_COMPRESSED_JPEG', c
+          assert c['passed'] is True and c['error'] is None, c
+          assert c['topic']==compressed_topic
+          assert raw_topic.startswith('/rubiks_physics_camera') and raw_topic.endswith('/image_raw')
+          assert compressed_topic==raw_topic+'/compressed'
+          assert any('jpeg' in f.lower() for f in c['formats']), c
+          assert m['capture_source']=='GAZEBO_ROS_CAMERA_COMPRESSED_JPEG', m
           assert m['gazebo_lockstep'] is True, m
           assert float(m['camera_update_rate_hz'])==30.0, m
-          assert m['camera_topic']==topic and topic.startswith('/rubiks_physics_camera') and topic.endswith('/image_raw')
+          assert m['compressed_topic']==compressed_topic
           assert m['passed'] is True, m
-          assert count==int(m['frame_count']) and count>=300, (count,m)
+          assert count==int(c['frame_count'])==int(m['frame_count']) and count>=240, (count,c,m)
+          assert float(c['sim_span_s'])>=8.0, c
+          assert 25.0<=float(c['simulated_fps'])<=35.0, c
           assert int(m['width'])==640 and int(m['height'])==480, m
-          assert float(m['video_duration_s'])>=10.0, m
+          assert float(m['video_duration_s'])>=8.0, m
           streams=p.get('streams') or []
           assert len(streams)==1 and int(streams[0]['width'])==640 and int(streams[0]['height'])==480, p
           assert int(streams[0].get('nb_frames') or 0)==count, (streams[0],count)
           fmt=p.get('format') or {}
-          assert float(fmt['duration'])>=10.0 and int(fmt['size'])>=10000, p
+          assert float(fmt['duration'])>=8.0 and int(fmt['size'])>=10000, p
           cstreams=cp.get('streams') or []
           assert len(cstreams)==1 and int(cstreams[0]['width'])==640 and int(cstreams[0]['height'])==480, cp
           assert int(cstreams[0].get('nb_frames') or 0)==count, (cstreams[0],count)
@@ -177,8 +196,10 @@ jobs:
             'capture_source':m['capture_source'],
             'lockstep':m['gazebo_lockstep'],
             'frames':count,
+            'sim_span_s':c['sim_span_s'],
+            'simulated_fps':c['simulated_fps'],
             'raw_duration_s':fmt['duration'],
-            'topic':topic,
+            'compressed_topic':compressed_topic,
           },indent=2))
           PY
 
@@ -213,7 +234,7 @@ jobs:
             'unsupported_left_quality':unsupported['left']['quality_fraction'],
             'unsupported_right_quality':unsupported['right']['quality_fraction'],
             'errors':s['errors'],
-            'next_phase':'TEST-ONLY-POSITION-PID-SUPPORTED-CHARACTERIZATION',
+            'next_phase':'TEST-ONLY-GRIPPER-CONTROL-SEMANTICS-CHARACTERIZATION',
           },indent=2))
           PY
 
