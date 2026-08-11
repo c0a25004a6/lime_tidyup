@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-humble-geometric-shapes \
     ros-humble-moveit-core \
     ros-humble-moveit-ros-planning \
+    ros-humble-realsense2-description \
     ros-humble-srdfdom \
     ros-humble-urdf \
     && rm -rf /var/lib/apt/lists/*
