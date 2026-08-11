@@ -1,0 +1,54 @@
+name: Rubik grasp follow-up prep
+
+on:
+  pull_request:
+    paths:
+      - 'bin/prepare_rubiks_grasp_followup.py'
+      - 'doc/rubiks_grasp_followup_prep.md'
+      - '.github/workflows/rubiks-grasp-followup-prep.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static-prep-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile follow-up router
+        run: python3 -m py_compile bin/prepare_rubiks_grasp_followup.py
+
+      - name: Run dependency-free self-test
+        run: python3 bin/prepare_rubiks_grasp_followup.py --self-test
+
+      - name: Assert command-free implementation boundary
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          source = Path('bin/prepare_rubiks_grasp_followup.py').read_text()
+          forbidden = (
+              'ActionClient(',
+              'MoveGroupInterface',
+              'FollowJointTrajectory',
+              'GripperCommand(',
+              'create_publisher(',
+              'create_client(',
+              'subprocess.run(',
+              'os.system(',
+          )
+          for token in forbidden:
+              if token in source:
+                  raise SystemExit(f'follow-up prep contains executable/command path: {token}')
+          required = (
+              'REMAINING_3D_COUNT',
+              'STATIC_GAZEBO_NO_ACTUATION',
+              'LOCAL_3D_EXPANSION',
+              'lift_allowed_in_next_phase',
+          )
+          for token in required:
+              if token not in source:
+                  raise SystemExit(f'follow-up prep lacks required boundary token: {token}')
+          PY
