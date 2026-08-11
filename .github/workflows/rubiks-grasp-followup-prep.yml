@@ -5,6 +5,7 @@ on:
     paths:
       - 'bin/prepare_rubiks_grasp_followup.py'
       - 'bin/prepare_rubiks_static_fixture_contract.py'
+      - 'bin/run_rubiks_gripper_fixture_3d_compatibility_scan.py'
       - 'doc/rubiks_grasp_followup_prep.md'
       - '.github/workflows/rubiks-grasp-followup-prep.yml'
   workflow_dispatch:
@@ -23,22 +24,24 @@ jobs:
         run: |
           python3 -m py_compile \
             bin/prepare_rubiks_grasp_followup.py \
-            bin/prepare_rubiks_static_fixture_contract.py
+            bin/prepare_rubiks_static_fixture_contract.py \
+            bin/run_rubiks_gripper_fixture_3d_compatibility_scan.py
 
       - name: Run dependency-free self-tests
         run: |
           python3 bin/prepare_rubiks_grasp_followup.py --self-test
           python3 bin/prepare_rubiks_static_fixture_contract.py --self-test
+          PYTHONPATH=bin python3 bin/run_rubiks_gripper_fixture_3d_compatibility_scan.py --self-test
 
-      - name: Assert command-free implementation boundary
+      - name: Assert safety boundaries
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          paths = (
+          prep_paths = (
               Path('bin/prepare_rubiks_grasp_followup.py'),
               Path('bin/prepare_rubiks_static_fixture_contract.py'),
           )
-          forbidden = (
+          forbidden_prep = (
               'ActionClient(',
               'MoveGroupInterface',
               'FollowJointTrajectory',
@@ -48,12 +51,24 @@ jobs:
               'subprocess.run(',
               'os.system(',
           )
-          for path in paths:
+          for path in prep_paths:
               source = path.read_text()
-              for token in forbidden:
+              for token in forbidden_prep:
                   if token in source:
                       raise SystemExit(f'{path} contains executable/command path: {token}')
-          router = paths[0].read_text()
+
+          runner = Path('bin/run_rubiks_gripper_fixture_3d_compatibility_scan.py').read_text()
+          for token in (
+              'ActionClient(', 'MoveGroupInterface', 'FollowJointTrajectory',
+              'GripperCommand(', 'create_publisher(', 'create_client(',
+          ):
+              if token in runner:
+                  raise SystemExit(f'3-D offline runner contains ROS/controller command path: {token}')
+          for token in ('EXPECTED_COUNT = 4896', 'ThreadPoolExecutor', 'subprocess.run', 'resume'):
+              if token not in runner:
+                  raise SystemExit(f'3-D offline runner lacks required implementation token: {token}')
+
+          router = prep_paths[0].read_text()
           for token in (
               'REMAINING_3D_COUNT',
               'STATIC_GAZEBO_NO_ACTUATION',
@@ -62,7 +77,7 @@ jobs:
           ):
               if token not in router:
                   raise SystemExit(f'follow-up router lacks required boundary token: {token}')
-          fixture = paths[1].read_text()
+          fixture = prep_paths[1].read_text()
           for token in (
               'fixture_spawn_allowed',
               'arm_command_allowed',
