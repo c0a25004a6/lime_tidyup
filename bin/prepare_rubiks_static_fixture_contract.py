@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Prepare corrected Rubik fixture inputs for the post-PR28 static Gazebo gate.
 
-This helper is deliberately command-free. For a positive PR #28 result it
-applies the selected rigid translation to the accepted cube/support fixture TSV
-and emits an observation-only contract. It does not start ROS/Gazebo or send
-arm/gripper commands.
+For a positive PR #28 result, apply the selected rigid translation to the
+accepted cube/support fixture contract and emit a no-actuation observation
+contract. This helper never starts ROS/Gazebo and never sends a robot command.
 """
 from __future__ import annotations
 
@@ -18,11 +17,20 @@ CENTER = (0.06325, 0.0, 0.01225)
 POSITIVE = "GRIPPER_FIXTURE_COMPATIBLE_FULL_PATH_CLEAR_TRANSLATION_FOUND"
 EXPECTED_PHASE = "RUBIK-PREGRASP-GRIPPER-FIXTURE-COMPATIBILITY-CORRECTION"
 NEXT_PHASE = "RUBIK-PREGRASP-CORRECTED-FIXTURE-STATIC-GAZEBO-NO-ACTUATION-EVIDENCE"
+EXPECTED_OBJECTS = {"rubiks_cube", "rubiks_support"}
 
 
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise ValueError(message)
+
+
+def close(a: float, b: float, tol: float = 1e-12) -> bool:
+    return abs(float(a) - float(b)) <= tol
+
+
+def close_vec(a: list[float], b: list[float], tol: float = 1e-12) -> bool:
+    return len(a) == len(b) and all(close(x, y, tol) for x, y in zip(a, b))
 
 
 def vec3(value: object, name: str) -> list[float]:
@@ -36,9 +44,9 @@ def validate_summary(summary: dict[str, object]) -> list[float]:
     require(summary.get("phase") == EXPECTED_PHASE, "unexpected PR28 phase")
     require(summary.get("audit_passed") is True and summary.get("errors") == [], "PR28 audit failed")
     require(summary.get("exact_head_bound") is True, "PR28 evidence is not exact-head bound")
-    require(summary.get("decision") == POSITIVE, "static fixture contract requires a positive PR28 result")
+    require(summary.get("decision") == POSITIVE, "static fixture contract requires positive PR28 evidence")
     require(summary.get("candidate_found") is True, "positive PR28 result has no candidate")
-    require(vec3(summary.get("center_translation_link7_m"), "center") == list(CENTER), "PR28 center mismatch")
+    require(close_vec(vec3(summary.get("center_translation_link7_m"), "center"), list(CENTER)), "PR28 center mismatch")
     require(summary.get("next_required_phase") == NEXT_PHASE, "PR28 next phase mismatch")
 
     selected = summary.get("selected_candidate")
@@ -69,10 +77,21 @@ def validate_summary(summary: dict[str, object]) -> list[float]:
     return translation
 
 
-def shift_fixture(source: Path, destination: Path, selected_translation: list[float]) -> list[dict[str, object]]:
-    shift = [selected_translation[index] - CENTER[index] for index in range(3)]
+def shift_fixture(
+    source: Path,
+    destination: Path,
+    selected_translation: list[float],
+) -> list[dict[str, object]]:
+    """Apply PR28 translation delta to both accepted fixture OBJECT offsets.
+
+    Accepted fixture schema:
+      META 1 link7 <...>
+      OBJECT <name> <size_x> <size_y> <size_z> <off_x> <off_y> <off_z>
+    """
+    shift = [selected_translation[i] - CENTER[i] for i in range(3)]
     output: list[str] = []
     objects: list[dict[str, object]] = []
+
     for raw in source.read_text(encoding="utf-8").splitlines():
         if not raw:
             continue
@@ -80,35 +99,44 @@ def shift_fixture(source: Path, destination: Path, selected_translation: list[fl
         if fields[0] != "OBJECT":
             output.append(raw)
             continue
+
         require(len(fields) == 8, "invalid fixture OBJECT row")
+        name = fields[1]
+        dimensions = [float(item) for item in fields[2:5]]
         original = [float(item) for item in fields[5:8]]
-        require(all(math.isfinite(item) for item in original), "fixture offset is not finite")
-        corrected = [original[index] + shift[index] for index in range(3)]
+        require(all(math.isfinite(item) and item > 0.0 for item in dimensions), "fixture dimensions invalid")
+        require(all(math.isfinite(item) for item in original), "fixture offset invalid")
+
+        corrected = [original[i] + shift[i] for i in range(3)]
         fields[5:8] = [f"{item:.17g}" for item in corrected]
         output.append("\t".join(fields))
         objects.append({
-            "kind": fields[1],
-            "name": fields[2],
+            "name": name,
+            "dimensions_m": dimensions,
             "original_offset_link7_m": original,
             "corrected_offset_link7_m": corrected,
         })
-    require(len(objects) == 2, "expected exactly cube and support OBJECT rows")
-    names = {str(item["name"]).lower() for item in objects}
-    require(any("cube" in name for name in names), "cube OBJECT row missing")
-    require(any("support" in name for name in names), "support OBJECT row missing")
+
+    require({str(item["name"]) for item in objects} == EXPECTED_OBJECTS, "fixture must contain exactly rubiks_cube and rubiks_support")
     destination.write_text("\n".join(output) + "\n", encoding="utf-8")
     return objects
 
 
-def build_contract(summary: dict[str, object], source_fixture: Path, corrected_fixture: Path) -> dict[str, object]:
+def build_contract(
+    summary: dict[str, object],
+    source_fixture: Path,
+    corrected_fixture: Path,
+) -> dict[str, object]:
     selected = validate_summary(summary)
     objects = shift_fixture(source_fixture, corrected_fixture, selected)
-    shift = [selected[index] - CENTER[index] for index in range(3)]
+    shift = [selected[i] - CENTER[i] for i in range(3)]
+
     return {
         "schema_version": 1,
         "phase": NEXT_PHASE,
         "input_phase": EXPECTED_PHASE,
         "input_source_ref": summary.get("source_ref"),
+        "reference_frame": "link7",
         "selected_translation_link7_m": selected,
         "translation_delta_from_pr28_center_m": shift,
         "corrected_fixture_path": corrected_fixture.name,
@@ -131,7 +159,7 @@ def build_contract(summary: dict[str, object], source_fixture: Path, corrected_f
             "link7 pose before and after fixture spawn",
             "cube and support model poses after spawn",
             "cube-support contact coverage and settling",
-            "zero finger-cube contact while open/passive before any later close gate",
+            "zero finger-cube contact while open/passive",
             "zero non-finger robot-fixture contact",
             "cube translation/rotation/speed during settling",
         ],
@@ -141,9 +169,9 @@ def build_contract(summary: dict[str, object], source_fixture: Path, corrected_f
 
 def fixture_text() -> str:
     return (
-        "META\t1\tfixture\n"
-        "OBJECT\tBOX\trubiks_cube\t0.057\t0.057\t-0.019\t0\t0.1192\n"
-        "OBJECT\tBOX\trubiks_support\t0.075\t0.040\t-0.019\t0\t0.0857\n"
+        "META\t1\tlink7\t1541\t1043\t2802\n"
+        "OBJECT\trubiks_cube\t0.057\t0.057\t0.057\t-0.019\t0\t0.1192\n"
+        "OBJECT\trubiks_support\t0.075\t0.040\t0.010\t-0.019\t0\t0.0857\n"
     )
 
 
@@ -189,15 +217,19 @@ def self_test() -> None:
         source = root / "fixture.tsv"
         corrected = root / "corrected.tsv"
         source.write_text(fixture_text(), encoding="utf-8")
+
         selected = [CENTER[0] - 0.0005, CENTER[1] + 0.00025, CENTER[2] + 0.001]
         contract = build_contract(positive_summary(selected), source, corrected)
-        require(contract["translation_delta_from_pr28_center_m"] == [-0.0005, 0.00025, 0.001], "translation delta mismatch")
+        require(
+            close_vec(contract["translation_delta_from_pr28_center_m"], [-0.0005, 0.00025, 0.001]),
+            "translation delta mismatch",
+        )
         objects = contract["objects"]
-        require(isinstance(objects, list) and len(objects) == 2, "object contract count mismatch")
-        cube = next(item for item in objects if "cube" in str(item["name"]).lower())
-        require(abs(cube["corrected_offset_link7_m"][0] - (-0.0195)) < 1e-12, "cube X correction mismatch")
-        require(abs(cube["corrected_offset_link7_m"][1] - 0.00025) < 1e-12, "cube Y correction mismatch")
-        require(abs(cube["corrected_offset_link7_m"][2] - 0.1202) < 1e-12, "cube Z correction mismatch")
+        require(isinstance(objects, list) and len(objects) == 2, "object count mismatch")
+        cube = next(item for item in objects if item["name"] == "rubiks_cube")
+        require(close_vec(cube["corrected_offset_link7_m"], [-0.0195, 0.00025, 0.1202]), "cube correction mismatch")
+        support = next(item for item in objects if item["name"] == "rubiks_support")
+        require(close_vec(support["corrected_offset_link7_m"], [-0.0195, 0.00025, 0.0867]), "support correction mismatch")
         require(contract["observation_contract"]["arm_command_allowed"] is False, "arm command accidentally allowed")
         require(contract["observation_contract"]["gripper_command_allowed"] is False, "gripper command accidentally allowed")
         require(contract["observation_contract"]["lift_allowed"] is False, "lift accidentally allowed")
@@ -210,6 +242,7 @@ def self_test() -> None:
             pass
         else:
             raise AssertionError("forbidden-collision candidate was accepted")
+
     print("prepare_rubiks_static_fixture_contract self-test: PASS")
 
 
@@ -221,13 +254,16 @@ def main() -> int:
     parser.add_argument("--output")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
+
     if args.self_test:
         self_test()
         return 0
+
     require(bool(args.pr28_summary), "--pr28-summary is required")
     require(bool(args.fixture), "--fixture is required")
     require(bool(args.corrected_fixture), "--corrected-fixture is required")
     require(bool(args.output), "--output is required")
+
     summary = json.loads(Path(args.pr28_summary).read_text(encoding="utf-8"))
     contract = build_contract(summary, Path(args.fixture), Path(args.corrected_fixture))
     Path(args.output).write_text(json.dumps(contract, indent=2, sort_keys=True) + "\n", encoding="utf-8")
