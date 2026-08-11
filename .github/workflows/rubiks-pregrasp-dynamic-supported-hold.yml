@@ -21,7 +21,7 @@ jobs:
     env:
       EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       OPEN_APPROACH_ARTIFACT_ID: '9090771854'
-      OPEN_APPROACH_ARTIFACT_SHA256: 13b34ce87dd8b43155a56a286448724de2441d0ea5f6948ab8b3bb0093141b7c
+      OPEN_APPROACH_ARTIFACT_SHA256: 13b34c0984582b5ac7e882891726744163702e74073cdc9af56287fa91e53d2b
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
@@ -100,7 +100,7 @@ jobs:
               'schema_version':1,
               'phase':'RUBIK-PREGRASP-OPEN-APPROACH-CLOSE-DYNAMIC-NO-LIFT-EVIDENCE',
               'source_open_approach_artifact_id':9090771854,
-              'source_open_approach_artifact_sha256':'13b34ce87dd8b43155a56a286448724de2441d0ea5f6948ab8b3bb0093141b7c',
+              'source_open_approach_artifact_sha256':'13b34c0984582b5ac7e882891726744163702e74073cdc9af56287fa91e53d2b',
               'selected_translation_link7_m':selected,
               'arm_anchor_index':1541,
               'arm_target_rad':arm,
