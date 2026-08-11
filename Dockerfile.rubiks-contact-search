@@ -1,0 +1,35 @@
+FROM osrf/ros:humble-desktop-full
+SHELL ["/bin/bash", "-c"]
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    python3-colcon-common-extensions \
+    ros-humble-geometric-shapes \
+    ros-humble-moveit-core \
+    ros-humble-moveit-ros-planning \
+    ros-humble-realsense2-description \
+    ros-humble-srdfdom \
+    ros-humble-urdf \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/lime_description_ws/src
+RUN git clone --depth 1 --branch humble-devel \
+    https://github.com/ROBOTIS-JAPAN-GIT/turtlebot3_lime.git
+WORKDIR /opt/lime_description_ws
+RUN source /opt/ros/humble/setup.bash \
+    && colcon build --merge-install \
+       --packages-select turtlebot3_lime_description \
+       --event-handlers console_direct+
+
+WORKDIR /opt/rubiks_ws
+COPY project/rubiks_self_collision_ws/src src
+RUN source /opt/ros/humble/setup.bash \
+    && source /opt/lime_description_ws/install/setup.bash \
+    && colcon build --merge-install \
+       --cmake-args -DCMAKE_BUILD_TYPE=Release \
+       --event-handlers console_direct+
+
+WORKDIR /opt/rubiks/bin
+COPY bin/generate_rubiks_opposing_side_contact_xz_candidates.py .
+
+WORKDIR /work
