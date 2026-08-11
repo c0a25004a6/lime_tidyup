@@ -74,11 +74,36 @@ jobs:
             lime-pr28-collision:${EXACT_HEAD_SHA} \
             bash -lc '
               # ROS/ament setup scripts are not nounset-safe. Enable nounset only
-              # after both setup files have populated their expected variables.
+              # after all setup files have populated their expected variables.
               set -eo pipefail
               source /opt/ros/humble/setup.bash
+              source /opt/lime_description_ws/install/setup.bash
               source /opt/rubiks_ws/install/setup.bash
               set -u
+
+              # Hard fail before collision evaluation if any package:// mesh used
+              # by the accepted URDF cannot be resolved. This prevents MoveIt from
+              # silently dropping arm/gripper collision geometry.
+              python3 - <<"PY"
+              import re
+              from pathlib import Path
+              from ament_index_python.packages import get_package_share_directory
+
+              urdf = Path("/artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.urdf").read_text()
+              refs = sorted(set(re.findall(r"package://([^/]+)/([^\"<]+)", urdf)))
+              assert refs, "accepted URDF contains no package:// resources"
+              resolved = []
+              for package, relative in refs:
+                  share = Path(get_package_share_directory(package))
+                  target = share / relative
+                  if not target.is_file():
+                      raise SystemExit(f"unresolved package resource: package://{package}/{relative} -> {target}")
+                  resolved.append(str(target))
+              print(f"resolved_package_resources={len(resolved)}")
+              assert any("gripper_left_palm.stl" in item for item in resolved)
+              assert any("gripper_right_palm.stl" in item for item in resolved)
+              assert any("link7.stl" in item for item in resolved)
+              PY
 
               python3 /opt/rubiks/bin/generate_rubiks_gripper_fixture_compatibility_candidates.py \
                 --pr27-summary /artifacts/pr27/rubiks_corrected_fixture_gripper_sweep_summary.json \
@@ -143,6 +168,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: rubiks-pr28-hosted-fallback-evidence
-          path: artifacts/
+          path: |
+            artifacts/rubiks_gripper_fixture_x_candidates.tsv
+            artifacts/rubiks_gripper_fixture_x_scan.tsv
+            artifacts/rubiks_gripper_fixture_x_compatible_candidates.tsv
+            artifacts/rubiks_gripper_fixture_x_full_path_results.tsv
+            artifacts/rubiks_gripper_fixture_x_compatibility_summary.json
+            artifacts/rubiks_gripper_fixture_x_compatibility_evidence.manifest.json
+            artifacts/x_scan_detail/
           if-no-files-found: warn
           retention-days: 30
