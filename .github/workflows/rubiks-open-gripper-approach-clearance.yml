@@ -1,0 +1,219 @@
+name: Rubik open-gripper approach clearance
+
+on:
+  pull_request:
+    paths:
+      - 'bin/rewrite_rubiks_pregrasp_open_gripper_states.py'
+      - 'project/rubiks_self_collision_ws/src/rubiks_self_collision_preflight/CMakeLists.txt'
+      - 'project/rubiks_self_collision_ws/src/rubiks_self_collision_preflight/src/rubiks_open_gripper_candidate_batch_preflight.cpp'
+      - '.github/workflows/rubiks-open-gripper-approach-clearance.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  open-gripper-path:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PR27_ARTIFACT_ID: '8985856167'
+      PR27_ARTIFACT_SHA256: 86d2b47a2d23fa43686da5a2654ba2568ee8b83c04b14a216e8ef57d025284f3
+      X_RESULT_ARTIFACT_ID: '9090099685'
+      X_RESULT_ARTIFACT_SHA256: 439886a94e2a90f12e050ad266cb72b6c04d522f0f454bedc636ae09a4d839db
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXACT_HEAD_SHA }}
+
+      - name: Validate rewrite and command-free boundary
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
+          python3 -m py_compile bin/rewrite_rubiks_pregrasp_open_gripper_states.py
+          python3 bin/rewrite_rubiks_pregrasp_open_gripper_states.py --self-test
+          ! grep -RE 'ActionClient|MoveGroupInterface|FollowJointTrajectory|GripperCommand|create_publisher|create_client|subprocess.run' \
+            bin/rewrite_rubiks_pregrasp_open_gripper_states.py
+
+      - name: Download accepted PR27 evidence
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/pr27
+          curl --fail --location --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PR27_ARTIFACT_ID}/zip" \
+            -o artifacts/pr27.zip
+          printf '%s  %s\n' "${PR27_ARTIFACT_SHA256}" artifacts/pr27.zip | sha256sum --check --strict
+          unzip -q artifacts/pr27.zip -d artifacts/pr27
+          test -s artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.urdf
+          test -s artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.srdf
+          test -s artifacts/pr27/pr26/pr23/accepted/pregrasp/rubiks_pregrasp_gripper_ground_states.tsv
+          test -s artifacts/pr27/pr26/pr23/accepted/rubiks_pregrasp_fixture_contract.tsv
+
+      - name: Download validated X-close result
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/x_result
+          curl --fail --location --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${X_RESULT_ARTIFACT_ID}/zip" \
+            -o artifacts/x_result.zip
+          printf '%s  %s\n' "${X_RESULT_ARTIFACT_SHA256}" artifacts/x_result.zip | sha256sum --check --strict
+          unzip -q artifacts/x_result.zip -d artifacts/x_result
+          test -s artifacts/x_result/rubiks_gripper_fixture_x_compatibility_summary.json
+          test -s artifacts/x_result/rubiks_gripper_fixture_x_compatible_candidates.tsv
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          s=json.loads(Path('artifacts/x_result/rubiks_gripper_fixture_x_compatibility_summary.json').read_text())
+          assert s['audit_passed'] is True and s['errors'] == []
+          assert s['candidate_found'] is False
+          assert s['x_scan']['candidate_count'] == 17
+          assert s['x_scan']['sweep_compatible_count'] == 8
+          lines=Path('artifacts/x_result/rubiks_gripper_fixture_x_compatible_candidates.tsv').read_text().splitlines()
+          assert len(lines) == 9
+          first=lines[1].split('\t')
+          assert first[0]=='CANDIDATE' and int(first[1])==0
+          # Nearest close-compatible X candidate is center -0.25 mm.
+          assert abs(float(first[2])-0.063) <= 1e-12
+          assert abs(float(first[3])) <= 1e-12
+          assert abs(float(first[4])-0.01225) <= 1e-12
+          PY
+
+      - name: Rewrite only finger states to fully open
+        run: |
+          set -euo pipefail
+          python3 bin/rewrite_rubiks_pregrasp_open_gripper_states.py \
+            --input artifacts/pr27/pr26/pr23/accepted/pregrasp/rubiks_pregrasp_gripper_ground_states.tsv \
+            --output artifacts/rubiks_pregrasp_open_gripper_states.tsv \
+            --summary artifacts/rubiks_pregrasp_open_gripper_state_rewrite.json
+          test "$(wc -l < artifacts/rubiks_pregrasp_open_gripper_states.tsv)" -eq 2802
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          s=json.loads(Path('artifacts/rubiks_pregrasp_open_gripper_state_rewrite.json').read_text())
+          assert s['state_count'] == 2802
+          assert s['open_gripper_position_m'] == 0.019
+          assert s['root_and_arm_text_preserved_exactly'] is True
+          assert s['passive_left_max_m'] < 0.0001
+          assert s['passive_right_max_m'] < 0.0001
+          PY
+
+      - name: Build exact collision image
+        run: |
+          set -euo pipefail
+          docker build -f Dockerfile.rubiks-collision -t lime-rubiks-open:${EXACT_HEAD_SHA} .
+
+      - name: Audit open gripper against self and ground
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/artifacts:/artifacts" \
+            lime-rubiks-open:${EXACT_HEAD_SHA} \
+            bash -lc '
+              set -eo pipefail
+              source /opt/ros/humble/setup.bash
+              source /opt/lime_description_ws/install/setup.bash
+              source /opt/rubiks_ws/install/setup.bash
+              set -u
+              python3 /opt/rubiks/bin/validate_rubiks_urdf_package_resources.py \
+                --urdf /artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.urdf
+              /opt/rubiks_ws/install/lib/rubiks_self_collision_preflight/rubiks_gripper_ground_clearance_preflight \
+                /artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.urdf \
+                /artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.srdf \
+                /artifacts/rubiks_pregrasp_open_gripper_states.tsv \
+                /artifacts/rubiks_open_gripper_ground_results.tsv
+            '
+
+          python3 - <<'PY'
+          from pathlib import Path
+          rows=Path('artifacts/rubiks_open_gripper_ground_results.tsv').read_text().splitlines()
+          states=[line.split('\t') for line in rows if line.startswith('STATE\t')]
+          assert len(states)==2802
+          for f in states:
+              assert f[2]=='true'   # bounds
+              assert f[3]=='true'   # mimic internal
+              assert f[5]=='true'   # measured/model projection (rewritten pair)
+              assert abs(float(f[7])-0.019) <= 1e-12
+              assert abs(float(f[8])-0.019) <= 1e-12
+              assert abs(float(f[9])-0.019) <= 1e-12
+              assert f[10]=='false' # self collision
+              assert f[11]=='false' # audited finger-ground collision
+          PY
+
+      - name: Re-evaluate X-close candidates with gripper open during approach
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/artifacts:/artifacts" \
+            lime-rubiks-open:${EXACT_HEAD_SHA} \
+            bash -lc '
+              set -eo pipefail
+              source /opt/ros/humble/setup.bash
+              source /opt/lime_description_ws/install/setup.bash
+              source /opt/rubiks_ws/install/setup.bash
+              set -u
+              /opt/rubiks_ws/install/lib/rubiks_self_collision_preflight/rubiks_open_gripper_candidate_batch_preflight \
+                /artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.urdf \
+                /artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.srdf \
+                /artifacts/rubiks_pregrasp_open_gripper_states.tsv \
+                /artifacts/pr27/pr26/pr23/accepted/rubiks_pregrasp_fixture_contract.tsv \
+                /artifacts/x_result/rubiks_gripper_fixture_x_compatible_candidates.tsv \
+                /artifacts/rubiks_open_gripper_x_full_path.tsv
+            '
+
+      - name: Validate open-approach result
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          rows=Path('artifacts/rubiks_open_gripper_x_full_path.tsv').read_text().splitlines()
+          meta=rows[0].split('\t')
+          assert meta[:3]==['META','1','OPEN_GRIPPER_PATH']
+          assert int(meta[4])==2802 and int(meta[5])==8
+          assert abs(float(meta[7])-0.019) <= 1e-12
+          select=None
+          candidates=[]
+          for line in rows[1:]:
+              f=line.split('\t')
+              if f[0]=='CANDIDATE': candidates.append(f)
+              if f[0]=='SELECT': select=f
+          assert select is not None
+          assert select[1]=='true', 'fully-open approach still has no full-path-clear X candidate'
+          assert int(select[7])==2802
+          result={
+              'selected_translation_m':[float(select[2]),float(select[3]),float(select[4])],
+              'selected_norm_m':float(select[5]),
+              'total_state_checks':int(select[6]),
+              'selected_states_checked':int(select[7]),
+              'candidate_rows_before_selection':len(candidates),
+              'gripper_open_m':0.019,
+              'next_phase':'RUBIK-PREGRASP-OPEN-APPROACH-CLOSE-DYNAMIC-NO-LIFT-EVIDENCE',
+              'grasp_success_claimed':False,
+              'lift_claimed':False,
+          }
+          Path('artifacts/rubiks_open_gripper_approach_summary.json').write_text(json.dumps(result,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(result,indent=2,sort_keys=True))
+          PY
+
+      - name: Upload open-approach evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-open-gripper-approach-clearance-evidence
+          path: |
+            artifacts/rubiks_pregrasp_open_gripper_state_rewrite.json
+            artifacts/rubiks_pregrasp_open_gripper_states.tsv
+            artifacts/rubiks_open_gripper_ground_results.tsv
+            artifacts/rubiks_open_gripper_x_full_path.tsv
+            artifacts/rubiks_open_gripper_approach_summary.json
+          if-no-files-found: warn
+          retention-days: 30
