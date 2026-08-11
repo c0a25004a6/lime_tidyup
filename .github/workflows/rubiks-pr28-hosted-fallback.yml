@@ -1,0 +1,150 @@
+name: Rubik PR28 hosted fallback
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/rubiks-pr28-hosted-fallback.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  hosted-x-correction:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PR27_ARTIFACT_ID: '8985856167'
+      PR27_ARTIFACT_SHA256: 86d2b47a2d23fa43686da5a2654ba2568ee8b83c04b14a216e8ef57d025284f3
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXACT_HEAD_SHA }}
+
+      - name: Validate static boundary
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
+          python3 -m py_compile \
+            bin/generate_rubiks_gripper_fixture_compatibility_candidates.py \
+            bin/run_rubiks_gripper_fixture_x_compatibility_scan.py \
+            bin/summarize_rubiks_gripper_fixture_x_compatibility.py
+          ! grep -RE 'ActionClient|MoveGroupInterface|FollowJointTrajectory|GripperCommand' \
+            project/rubiks_self_collision_ws/src/rubiks_self_collision_preflight/src/rubiks_corrected_fixture_gripper_sweep_preflight.cpp \
+            project/rubiks_self_collision_ws/src/rubiks_self_collision_preflight/src/rubiks_relevance_candidate_batch_preflight.cpp
+
+      - name: Download accepted PR27 evidence
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/pr27
+          curl --fail --location --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PR27_ARTIFACT_ID}/zip" \
+            -o artifacts/pr27.zip
+          printf '%s  %s\n' "${PR27_ARTIFACT_SHA256}" artifacts/pr27.zip | sha256sum --check --strict
+          unzip -q artifacts/pr27.zip -d artifacts/pr27
+          test -s artifacts/pr27/rubiks_corrected_fixture_gripper_sweep_summary.json
+          test -s artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.urdf
+          test -s artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.srdf
+          test -s artifacts/pr27/pr26/pr23/accepted/pregrasp/rubiks_pregrasp_gripper_ground_states.tsv
+          test -s artifacts/pr27/pr26/pr23/accepted/rubiks_pregrasp_fixture_contract.tsv
+
+      - name: Build Lime collision image on hosted runner
+        run: |
+          set -euo pipefail
+          df -h
+          docker build -t lime-pr28-hosted:${EXACT_HEAD_SHA} .
+
+      - name: Run exact X compatibility scan
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -e SOURCE_REF="${EXACT_HEAD_SHA}" \
+            -v "$PWD/artifacts:/artifacts" \
+            lime-pr28-hosted:${EXACT_HEAD_SHA} \
+            bash -lc '
+              set -euo pipefail
+              source /opt/ros/humble/setup.bash
+              source /project/lib_ws/install/setup.bash
+              source /root/turtlebot3_ws/install/setup.bash
+
+              python3 /root/bin/generate_rubiks_gripper_fixture_compatibility_candidates.py \
+                --pr27-summary /artifacts/pr27/rubiks_corrected_fixture_gripper_sweep_summary.json \
+                --output /artifacts/rubiks_gripper_fixture_x_candidates.tsv
+
+              colcon build --merge-install \
+                --base-paths /project/rubiks_self_collision_ws/src \
+                --build-base /tmp/rubiks_fixture_compat_build \
+                --install-base /tmp/rubiks_fixture_compat_install \
+                --cmake-args -DCMAKE_BUILD_TYPE=Release \
+                --event-handlers console_direct+
+              source /tmp/rubiks_fixture_compat_install/setup.bash
+
+              python3 /root/bin/run_rubiks_gripper_fixture_x_compatibility_scan.py \
+                --candidates /artifacts/rubiks_gripper_fixture_x_candidates.tsv \
+                --fixture /artifacts/pr27/pr26/pr23/accepted/rubiks_pregrasp_fixture_contract.tsv \
+                --sweep-executable /tmp/rubiks_fixture_compat_install/lib/rubiks_self_collision_preflight/rubiks_corrected_fixture_gripper_sweep_preflight \
+                --urdf /artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.urdf \
+                --srdf /artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.srdf \
+                --states /artifacts/pr27/pr26/pr23/accepted/pregrasp/rubiks_pregrasp_gripper_ground_states.tsv \
+                --work-dir /artifacts/x_scan_detail \
+                --scan-output /artifacts/rubiks_gripper_fixture_x_scan.tsv \
+                --compatible-candidates /artifacts/rubiks_gripper_fixture_x_compatible_candidates.tsv
+
+              compatible_count="$(head -n1 /artifacts/rubiks_gripper_fixture_x_compatible_candidates.tsv | cut -f4)"
+              if [[ "${compatible_count}" -gt 0 ]]; then
+                /tmp/rubiks_fixture_compat_install/lib/rubiks_self_collision_preflight/rubiks_relevance_candidate_batch_preflight \
+                  /artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.urdf \
+                  /artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.srdf \
+                  /artifacts/pr27/pr26/pr23/accepted/pregrasp/rubiks_pregrasp_gripper_ground_states.tsv \
+                  /artifacts/pr27/pr26/pr23/accepted/rubiks_pregrasp_fixture_contract.tsv \
+                  /artifacts/rubiks_gripper_fixture_x_compatible_candidates.tsv \
+                  /artifacts/rubiks_gripper_fixture_x_full_path_results.tsv
+              fi
+
+              args=(
+                --pr27-summary /artifacts/pr27/rubiks_corrected_fixture_gripper_sweep_summary.json
+                --candidates /artifacts/rubiks_gripper_fixture_x_candidates.tsv
+                --scan /artifacts/rubiks_gripper_fixture_x_scan.tsv
+                --compatible-candidates /artifacts/rubiks_gripper_fixture_x_compatible_candidates.tsv
+                --output /artifacts/rubiks_gripper_fixture_x_compatibility_summary.json
+                --manifest /artifacts/rubiks_gripper_fixture_x_compatibility_evidence.manifest.json
+                --source-ref "${SOURCE_REF}"
+              )
+              [[ ! -s /artifacts/rubiks_gripper_fixture_x_full_path_results.tsv ]] || \
+                args+=(--full-path-results /artifacts/rubiks_gripper_fixture_x_full_path_results.tsv)
+              python3 /root/bin/summarize_rubiks_gripper_fixture_x_compatibility.py "${args[@]}"
+            '
+
+      - name: Validate evidence
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          p = Path('artifacts/rubiks_gripper_fixture_x_compatibility_summary.json')
+          s = json.loads(p.read_text())
+          assert s['source_ref'] == os.environ['EXACT_HEAD_SHA']
+          assert s['audit_passed'] is True and s['errors'] == []
+          assert s['x_scan']['candidate_count'] == 17
+          assert s['decision'] in {
+              'GRIPPER_FIXTURE_COMPATIBLE_FULL_PATH_CLEAR_TRANSLATION_FOUND',
+              'NO_SWEEP_COMPATIBLE_TRANSLATION_IN_LOCAL_X_DOMAIN',
+              'NO_SWEEP_COMPATIBLE_FULL_PATH_CLEAR_TRANSLATION_IN_LOCAL_X_DOMAIN',
+          }
+          print(json.dumps(s, indent=2, sort_keys=True))
+          PY
+
+      - name: Upload hosted fallback evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-pr28-hosted-fallback-evidence
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 30
