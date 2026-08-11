@@ -73,9 +73,12 @@ jobs:
             -v "$PWD/artifacts:/artifacts" \
             lime-pr28-collision:${EXACT_HEAD_SHA} \
             bash -lc '
-              set -euo pipefail
+              # ROS/ament setup scripts are not nounset-safe. Enable nounset only
+              # after both setup files have populated their expected variables.
+              set -eo pipefail
               source /opt/ros/humble/setup.bash
               source /opt/rubiks_ws/install/setup.bash
+              set -u
 
               python3 /opt/rubiks/bin/generate_rubiks_gripper_fixture_compatibility_candidates.py \
                 --pr27-summary /artifacts/pr27/rubiks_corrected_fixture_gripper_sweep_summary.json \
