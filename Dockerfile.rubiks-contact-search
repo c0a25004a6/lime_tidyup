@@ -31,5 +31,6 @@ RUN source /opt/ros/humble/setup.bash \
 
 WORKDIR /opt/rubiks/bin
 COPY bin/generate_rubiks_opposing_side_contact_xz_candidates.py .
+COPY bin/generate_rubiks_opposing_side_contact_negative_x_candidates.py .
 
 WORKDIR /work
