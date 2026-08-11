@@ -1,0 +1,248 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+ARTIFACT_DIR="${1:-/artifacts}"
+mkdir -p "${ARTIFACT_DIR}"
+INPUT_JSON="${ARTIFACT_DIR}/rubiks_pregrasp_dynamic_gate_input.json"
+test -s "${INPUT_JSON}"
+
+source /opt/ros/humble/setup.bash
+source /project/lib_ws/install/setup.bash
+source /root/turtlebot3_ws/install/setup.bash
+set -u
+
+export GAZEBO_MODEL_PATH="${GAZEBO_MODEL_PATH:-}:/root/.gazebo/models:/opt/ros/humble/share/turtlebot3_gazebo/models"
+export GAZEBO_PLUGIN_PATH="${GAZEBO_PLUGIN_PATH:-}:/project/lib_ws/install/IFRA_LinkAttacher/lib:/opt/ros/humble/lib"
+
+MODEL_NAME="turtlebot3_lime_gripper_test"
+URDF_PATH="${ARTIFACT_DIR}/turtlebot3_lime_pregrasp_hold_test.urdf"
+SERVER_LOG="${ARTIFACT_DIR}/rubiks_pregrasp_dynamic_hold.gzserver.log"
+RSP_LOG="${ARTIFACT_DIR}/rubiks_pregrasp_dynamic_hold.robot_state_publisher.log"
+SETUP_JSON="${ARTIFACT_DIR}/rubiks_open_arm_pregrasp_setup.json"
+HOLD_JSON="${ARTIFACT_DIR}/rubiks_dynamic_supported_hold_telemetry.json"
+COMBINED_JSON="${ARTIFACT_DIR}/rubiks_pregrasp_dynamic_supported_hold_summary.json"
+
+cleanup() {
+  status=$?
+  for pid in "${GZSERVER_PID:-}" "${RSP_PID:-}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+      kill -INT "${pid}" 2>/dev/null || true
+    fi
+  done
+  sleep 2
+  for pid in "${GZSERVER_PID:-}" "${RSP_PID:-}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then
+      kill -TERM "${pid}" 2>/dev/null || true
+      wait "${pid}" 2>/dev/null || true
+    fi
+  done
+  exit "${status}"
+}
+trap cleanup EXIT INT TERM
+
+ros2_service_available() {
+  local service_type
+  service_type="$(timeout 5 ros2 service type "$1" 2>/dev/null)" || return 1
+  [[ -n "${service_type}" ]]
+}
+
+ros2_action_available() {
+  local output padded
+  output="$(timeout 5 ros2 action list 2>/dev/null)" || return 1
+  padded=$'\n'"${output}"$'\n'
+  [[ "${padded}" == *$'\n'"$1"$'\n'* ]]
+}
+
+xacro /project/resource/turtlebot3_lime_pregrasp_hold_test.urdf.xacro >"${URDF_PATH}"
+grep -q 'libgazebo_ros2_control.so' "${URDF_PATH}"
+! grep -q 'libgazebo_grasp_fix.so' "${URDF_PATH}"
+! grep -q 'libgazebo_ros_diff_drive.so' "${URDF_PATH}"
+! grep -q 'librealsense_gazebo_plugin.so' "${URDF_PATH}"
+
+ros2 run robot_state_publisher robot_state_publisher "${URDF_PATH}" \
+  --ros-args -p use_sim_time:=true >"${RSP_LOG}" 2>&1 &
+RSP_PID=$!
+sleep 2
+kill -0 "${RSP_PID}" 2>/dev/null || { cat "${RSP_LOG}"; exit 2; }
+
+gzserver /project/resource/rubiks_grasp_calibration.world \
+  -s libgazebo_ros_init.so -s libgazebo_ros_factory.so \
+  >"${SERVER_LOG}" 2>&1 &
+GZSERVER_PID=$!
+
+for _ in $(seq 1 90); do
+  ros2_service_available '/spawn_entity' && break
+  kill -0 "${GZSERVER_PID}" 2>/dev/null || { cat "${SERVER_LOG}"; exit 3; }
+  sleep 1
+done
+ros2_service_available '/spawn_entity' || { cat "${SERVER_LOG}"; exit 3; }
+
+ros2 run gazebo_ros spawn_entity.py \
+  -entity "${MODEL_NAME}" -file "${URDF_PATH}" \
+  -x 0.0 -y 0.0 -z 0.03 -Y 0.0 \
+  >"${ARTIFACT_DIR}/rubiks_pregrasp_dynamic_hold.robot_spawn.log" 2>&1
+
+for _ in $(seq 1 90); do
+  ros2_service_available '/controller_manager/list_controllers' && break
+  kill -0 "${GZSERVER_PID}" 2>/dev/null || { cat "${SERVER_LOG}"; exit 4; }
+  sleep 1
+done
+ros2_service_available '/controller_manager/list_controllers' || { cat "${SERVER_LOG}"; exit 4; }
+
+ros2 run controller_manager spawner joint_state_broadcaster \
+  --controller-manager /controller_manager \
+  >"${ARTIFACT_DIR}/pregrasp_hold_joint_state_broadcaster.spawner.log" 2>&1
+ros2 run controller_manager spawner arm_controller \
+  --controller-manager /controller_manager \
+  >"${ARTIFACT_DIR}/pregrasp_hold_arm_controller.spawner.log" 2>&1
+ros2 run controller_manager spawner gripper_controller \
+  --controller-manager /controller_manager \
+  >"${ARTIFACT_DIR}/pregrasp_hold_gripper_controller.spawner.log" 2>&1
+
+for _ in $(seq 1 60); do
+  if ros2_action_available '/arm_controller/follow_joint_trajectory' && \
+     ros2_action_available '/gripper_controller/gripper_cmd'; then
+    break
+  fi
+  sleep 1
+done
+ros2_action_available '/arm_controller/follow_joint_trajectory' || exit 5
+ros2_action_available '/gripper_controller/gripper_cmd' || exit 5
+
+sleep 2
+python3 /root/bin/run_rubiks_open_arm_pregrasp_setup.py \
+  --input "${INPUT_JSON}" \
+  --output "${SETUP_JSON}" \
+  --arm-seconds 3.0 \
+  --timeout 12.0 \
+  >"${ARTIFACT_DIR}/rubiks_open_arm_pregrasp_setup.stdout.json" \
+  2>"${ARTIFACT_DIR}/rubiks_open_arm_pregrasp_setup.stderr.log"
+
+readarray -t GEOMETRY < <(python3 - "${INPUT_JSON}" <<'PY'
+import json, sys
+p=json.load(open(sys.argv[1]))
+for key in ('cube_effective_offset_link7_m','support_effective_offset_link7_m'):
+    for value in p[key]:
+        print(f'{float(value):.17g}')
+PY
+)
+[[ "${#GEOMETRY[@]}" -eq 6 ]]
+
+set +e
+python3 /root/bin/run_rubiks_dynamic_supported_hold.py \
+  --cube-sdf /project/resource/rubiks_dynamic_cube_supported_057.sdf \
+  --support-sdf /project/resource/rubiks_cube_support_surface.sdf \
+  --cube-width 0.057 --cube-mass 0.09 \
+  --combined-inner-face-offset 0.003000000004097683 \
+  --calibration-uncertainty 0.0003279557798182653 \
+  --reference-frame "${MODEL_NAME}::link7" \
+  --cube-x "${GEOMETRY[0]}" --cube-y "${GEOMETRY[1]}" --cube-z "${GEOMETRY[2]}" \
+  --support-x "${GEOMETRY[3]}" --support-y "${GEOMETRY[4]}" --support-z "${GEOMETRY[5]}" \
+  --settle-seconds 2.0 --hold-seconds 2.0 --release-settle-seconds 1.5 \
+  --close-start 0.0185 --close-stop 0.0060 --close-step 0.00025 \
+  --step-hold 0.12 --max-effort 0.25 --timeout 8.0 \
+  --output "${HOLD_JSON}" \
+  >"${ARTIFACT_DIR}/rubiks_pregrasp_dynamic_hold.stdout.json" \
+  2>"${ARTIFACT_DIR}/rubiks_pregrasp_dynamic_hold.stderr.log"
+HOLD_STATUS=$?
+set -e
+
+python3 - "${INPUT_JSON}" "${SETUP_JSON}" "${HOLD_JSON}" "${COMBINED_JSON}" "${HOLD_STATUS}" <<'PY'
+import json, math, sys
+from pathlib import Path
+
+input_data=json.loads(Path(sys.argv[1]).read_text())
+setup=json.loads(Path(sys.argv[2]).read_text())
+hold_path=Path(sys.argv[3])
+out=Path(sys.argv[4])
+hold_status=int(sys.argv[5])
+errors=[]
+if setup.get('errors'):
+    errors.extend(f'setup: {e}' for e in setup['errors'])
+if setup.get('gripper_open_before_arm') is not True:
+    errors.append('gripper was not opened before arm motion')
+if setup.get('arm_motion_performed') is not True:
+    errors.append('pregrasp arm motion was not completed')
+arm=setup.get('arm_result') or {}
+if float(arm.get('max_abs_error_rad', 1.0)) > 0.01:
+    errors.append('pregrasp final joint error exceeds 0.01 rad')
+if abs(float(arm.get('measured_left_gripper_m', 0.0))-0.019) > 0.002:
+    errors.append('left gripper did not remain open during arm motion')
+if abs(float(arm.get('measured_right_gripper_m', 0.0))-0.019) > 0.002:
+    errors.append('right gripper did not remain open during arm motion')
+
+hold=None
+if not hold_path.is_file():
+    errors.append(f'dynamic hold telemetry missing; process_status={hold_status}')
+else:
+    hold=json.loads(hold_path.read_text())
+    if hold_status != 0:
+        errors.append(f'dynamic hold process exited {hold_status}: {hold.get("errors")}')
+    if hold.get('errors'):
+        errors.extend(f'hold: {e}' for e in hold['errors'])
+    for key in (
+        'cube_spawned','cube_dynamic','cube_mass_dynamics_tested','support_static',
+        'support_contact_before_close','left_cube_contact_observed',
+        'right_cube_contact_observed','dual_cube_contact_observed',
+        'contact_cleared_after_reopen','calibration_applied',
+    ):
+        if hold.get(key) is not True:
+            errors.append(f'{key} must be true')
+    if hold.get('initial_open_finger_contact') is not False:
+        errors.append('cube contacted finger before close')
+    if int(hold.get('unexpected_robot_contact_count', -1)) != 0:
+        errors.append('unexpected robot-cube contact observed')
+    if hold.get('lift_command_sent') is not False:
+        errors.append('lift command must remain false')
+    if hold.get('ifra_attachment_used') is not False:
+        errors.append('IFRA attachment must remain false')
+    contact=hold.get('contact_result') or {}
+    bounded=hold.get('hold_result') or {}
+    release=hold.get('release_result') or {}
+    if int(contact.get('dual_contact_sample_count',0)) < 10:
+        errors.append('insufficient bilateral contact samples')
+    if float(contact.get('max_contact_depth_m',1.0)) > 0.001:
+        errors.append('contact penetration exceeds 1 mm')
+    if float(bounded.get('observed_hold_seconds',0.0)) < 1.9:
+        errors.append('hold interval too short')
+    if float(bounded.get('support_contact_ratio',0.0)) < 0.75:
+        errors.append('support contact coverage too low during hold')
+    if float(bounded.get('bilateral_finger_contact_ratio',0.0)) < 0.65:
+        errors.append('bilateral finger contact coverage too low during hold')
+    movement=bounded.get('movement') or {}
+    if float(movement.get('max_horizontal_displacement_m',1.0)) > 0.003:
+        errors.append('cube slid too far during hold')
+    if float(movement.get('max_vertical_rise_m',1.0)) > 0.0015:
+        errors.append('cube rose from support during no-lift hold')
+    if float(movement.get('max_rotation_rad',1.0)) > 0.10:
+        errors.append('cube rotated too far during hold')
+    if float(release.get('support_contact_ratio',0.0)) < 0.75:
+        errors.append('support contact coverage too low after reopen')
+
+summary={
+    'schema_version':1,
+    'phase':'RUBIK-PREGRASP-OPEN-APPROACH-CLOSE-DYNAMIC-NO-LIFT-EVIDENCE',
+    'input':input_data,
+    'setup_passed':not bool(setup.get('errors')),
+    'dynamic_hold_process_status':hold_status,
+    'dynamic_hold_passed':hold is not None and hold_status==0 and not bool(hold.get('errors')),
+    'gripper_open_before_arm':setup.get('gripper_open_before_arm'),
+    'arm_motion_performed':setup.get('arm_motion_performed'),
+    'cube_dynamic':None if hold is None else hold.get('cube_dynamic'),
+    'cube_mass_kg':None if hold is None else hold.get('cube_mass_kg'),
+    'support_contact_before_close':None if hold is None else hold.get('support_contact_before_close'),
+    'dual_cube_contact_observed':None if hold is None else hold.get('dual_cube_contact_observed'),
+    'contact_result':None if hold is None else hold.get('contact_result'),
+    'hold_result':None if hold is None else hold.get('hold_result'),
+    'release_result':None if hold is None else hold.get('release_result'),
+    'lift_command_sent':False,
+    'attachment_used':False,
+    'grasp_success_claimed':False,
+    'passed':not errors,
+    'errors':errors,
+}
+out.write_text(json.dumps(summary,indent=2,sort_keys=True)+'\n')
+print(json.dumps(summary,indent=2,sort_keys=True))
+if errors:
+    raise SystemExit('\n'.join(errors))
+PY
