@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-humble-realsense2-description \
     ros-humble-ros2-controllers \
     ros-humble-xacro \
+    xvfb \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /root/turtlebot3_ws/src
