@@ -7,7 +7,9 @@ INPUT_JSON="${ARTIFACT_DIR}/rubiks_integrated_dynamic_gate_input.json"
 test -s "${INPUT_JSON}"
 
 source /opt/ros/humble/setup.bash
-source /project/lib_ws/install/setup.bash
+if [[ -f /project/lib_ws/install/setup.bash ]]; then
+  source /project/lib_ws/install/setup.bash
+fi
 source /root/turtlebot3_ws/install/setup.bash
 set -u
 
