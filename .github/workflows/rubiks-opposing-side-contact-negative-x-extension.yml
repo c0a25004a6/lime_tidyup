@@ -1,0 +1,244 @@
+name: Rubik opposing side-contact negative-X extension
+
+on:
+  pull_request:
+    paths:
+      - 'Dockerfile.rubiks-contact-search'
+      - 'bin/generate_rubiks_opposing_side_contact_negative_x_candidates.py'
+      - '.github/workflows/rubiks-opposing-side-contact-negative-x-extension.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  exact-mesh-negative-x-extension:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PR27_ARTIFACT_ID: '8985856167'
+      PR27_ARTIFACT_SHA256: 86d2b47a2d23fa43686da5a2654ba2568ee8b83c04b14a216e8ef57d025284f3
+      PR37_ARTIFACT_ID: '9090771854'
+      PR37_ARTIFACT_SHA256: 13b34c0984582b5ac7e882891726744163702e74073cdc9af56287fa91e53d2b
+      PR40_ARTIFACT_ID: '9092431594'
+      PR40_ARTIFACT_SHA256: c883001e1e1b6f235962f3261f69b2a000e16b61c37722d3f721a43a86d3a40f
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXACT_HEAD_SHA }}
+
+      - name: Validate directional extension contract
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
+          python3 -m py_compile bin/generate_rubiks_opposing_side_contact_negative_x_candidates.py
+          python3 bin/generate_rubiks_opposing_side_contact_negative_x_candidates.py --self-test
+          ! grep -RE 'ActionClient|MoveGroupInterface|FollowJointTrajectory|GripperCommand|create_publisher|create_client' \
+            bin/generate_rubiks_opposing_side_contact_negative_x_candidates.py \
+            project/rubiks_self_collision_ws/src/rubiks_self_collision_preflight/src/rubiks_opposing_side_contact_search_preflight.cpp
+
+      - name: Bind PR40 negative boundary evidence
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/pr40
+          curl --fail --location --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PR40_ARTIFACT_ID}/zip" \
+            -o artifacts/pr40.zip
+          printf '%s  %s\n' "${PR40_ARTIFACT_SHA256}" artifacts/pr40.zip | sha256sum --check --strict
+          unzip -q artifacts/pr40.zip -d artifacts/pr40
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          summary=json.loads(Path('artifacts/pr40/rubiks_opposing_side_contact_xz_summary.json').read_text())
+          assert summary['decision']=='NO_OPPOSING_SIDE_CONTACT_IN_LOCAL_XZ_DOMAIN'
+          assert summary['quality_candidate_count']==0
+          assert summary['candidate_count']==441
+          assert summary['center_translation_link7_m']==[0.063,0.0,0.01225]
+
+          rows=[]
+          for line in Path('artifacts/pr40/rubiks_opposing_side_contact_xz_scan.tsv').read_text().splitlines():
+              f=line.split('\t')
+              if f[0]!='SCAN' or 'NOT_OPPOSING_SIDE_FACE_QUALITY' not in f[8]:
+                  continue
+              dx=int(f[6]); dz=int(f[7])
+              left_fraction=float(f[12]); right_fraction=float(f[22])
+              rows.append((min(left_fraction,right_fraction),dx,dz,left_fraction,right_fraction))
+          assert rows
+          best=max(rows)
+          assert best[1]==-10, best
+          assert best[0] >= 0.55 - 1e-12, best
+          print({'best_previous_quality_fraction':best[0], 'dx':best[1], 'dz':best[2]})
+          PY
+
+      - name: Download accepted PR27 exact-mesh fixture evidence
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/pr27
+          curl --fail --location --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PR27_ARTIFACT_ID}/zip" \
+            -o artifacts/pr27.zip
+          printf '%s  %s\n' "${PR27_ARTIFACT_SHA256}" artifacts/pr27.zip | sha256sum --check --strict
+          unzip -q artifacts/pr27.zip -d artifacts/pr27
+          test -s artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.urdf
+          test -s artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.srdf
+          test -s artifacts/pr27/pr26/pr23/accepted/rubiks_pregrasp_fixture_contract.tsv
+
+      - name: Download accepted PR37 fully-open approach evidence
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/pr37
+          curl --fail --location --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PR37_ARTIFACT_ID}/zip" \
+            -o artifacts/pr37.zip
+          printf '%s  %s\n' "${PR37_ARTIFACT_SHA256}" artifacts/pr37.zip | sha256sum --check --strict
+          unzip -q artifacts/pr37.zip -d artifacts/pr37
+          test -s artifacts/pr37/rubiks_pregrasp_open_gripper_states.tsv
+          python3 - <<'PY'
+          from pathlib import Path
+          states=Path('artifacts/pr37/rubiks_pregrasp_open_gripper_states.tsv').read_text().splitlines()
+          assert len(states)==2802
+          assert all(abs(float(line.split('\t')[14])-0.019) <= 1e-12 for line in states)
+          assert all(abs(float(line.split('\t')[15])-0.019) <= 1e-12 for line in states)
+          PY
+
+      - name: Build exact-mesh contact-search image
+        run: |
+          set -euo pipefail
+          docker build -f Dockerfile.rubiks-contact-search -t lime-rubiks-contact-search:${EXACT_HEAD_SHA} .
+
+      - name: Search previously untested negative-X strip
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/artifacts:/artifacts" \
+            lime-rubiks-contact-search:${EXACT_HEAD_SHA} \
+            bash -lc '
+              set -eo pipefail
+              source /opt/ros/humble/setup.bash
+              source /opt/lime_description_ws/install/setup.bash
+              source /opt/rubiks_ws/install/setup.bash
+              set -u
+
+              python3 /opt/rubiks/bin/generate_rubiks_opposing_side_contact_negative_x_candidates.py \
+                --output /artifacts/rubiks_opposing_side_contact_negative_x_candidates.tsv
+
+              /opt/rubiks_ws/install/lib/rubiks_self_collision_preflight/rubiks_opposing_side_contact_search_preflight \
+                /artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.urdf \
+                /artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.srdf \
+                /artifacts/pr37/rubiks_pregrasp_open_gripper_states.tsv \
+                /artifacts/pr27/pr26/pr23/accepted/rubiks_pregrasp_fixture_contract.tsv \
+                /artifacts/rubiks_opposing_side_contact_negative_x_candidates.tsv \
+                /artifacts/rubiks_opposing_side_contact_negative_x_scan.tsv \
+                /artifacts/rubiks_opposing_side_contact_negative_x_compatible.tsv
+
+              quality_count="$(head -n1 /artifacts/rubiks_opposing_side_contact_negative_x_compatible.tsv | cut -f4)"
+              echo "quality_count=${quality_count}"
+              if [[ "${quality_count}" -gt 0 ]]; then
+                /opt/rubiks_ws/install/lib/rubiks_self_collision_preflight/rubiks_relevance_candidate_batch_preflight \
+                  /artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.urdf \
+                  /artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.srdf \
+                  /artifacts/pr37/rubiks_pregrasp_open_gripper_states.tsv \
+                  /artifacts/pr27/pr26/pr23/accepted/rubiks_pregrasp_fixture_contract.tsv \
+                  /artifacts/rubiks_opposing_side_contact_negative_x_compatible.tsv \
+                  /artifacts/rubiks_opposing_side_contact_negative_x_full_path.tsv
+              fi
+            '
+
+      - name: Summarize negative-X extension
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          scan=Path('artifacts/rubiks_opposing_side_contact_negative_x_scan.tsv')
+          compatible=Path('artifacts/rubiks_opposing_side_contact_negative_x_compatible.tsv')
+          quality_count=int(compatible.read_text().splitlines()[0].split('\t')[3])
+          select=None
+          fp=Path('artifacts/rubiks_opposing_side_contact_negative_x_full_path.tsv')
+          if fp.exists() and fp.stat().st_size:
+              for line in fp.read_text().splitlines():
+                  f=line.split('\t')
+                  if f[0]=='SELECT':
+                      select={
+                          'found':f[1]=='true',
+                          'translation_m':[float(v) for v in f[2:5]],
+                          'norm_m':float(f[5]),
+                          'total_state_checks':int(f[6]),
+                          'selected_states_checked':int(f[7]),
+                      }
+
+          near=[]
+          for line in scan.read_text().splitlines():
+              f=line.split('\t')
+              if f[0]!='SCAN' or 'NOT_OPPOSING_SIDE_FACE_QUALITY' not in f[8]:
+                  continue
+              left_fraction=float(f[12]); right_fraction=float(f[22])
+              near.append({
+                  'rank':int(f[1]),
+                  'translation_m':[float(v) for v in f[2:5]],
+                  'dx':int(f[6]), 'dz':int(f[7]),
+                  'left_quality_fraction':left_fraction,
+                  'right_quality_fraction':right_fraction,
+                  'min_quality_fraction':min(left_fraction,right_fraction),
+                  'left_mean_local_position_m':[float(v) for v in f[14:17]],
+                  'right_mean_local_position_m':[float(v) for v in f[24:27]],
+              })
+          near.sort(key=lambda r:(r['min_quality_fraction'],-abs(r['dx']),-abs(r['dz'])), reverse=True)
+          result={
+              'schema_version':1,
+              'phase':'RUBIK-OPPOSING-SIDE-CONTACT-NEGATIVE-X-EXTENSION',
+              'candidate_count':441,
+              'center_translation_link7_m':[0.063,0.0,0.01225],
+              'step_m':0.0005,
+              'dx_steps':[-31,-11],
+              'x_translation_m':[0.0475,0.0575],
+              'dz_steps':[-10,10],
+              'z_translation_m':[0.00725,0.01725],
+              'quality_candidate_count':quality_count,
+              'best_quality_near_misses':near[:10],
+              'full_path_select':select,
+              'decision':(
+                  'OPPOSING_SIDE_CONTACT_AND_OPEN_APPROACH_CLEAR_FOUND'
+                  if select and select['found'] else
+                  'OPPOSING_SIDE_CONTACT_FOUND_BUT_NO_OPEN_APPROACH_CLEAR'
+                  if quality_count else
+                  'NO_OPPOSING_SIDE_CONTACT_IN_NEGATIVE_X_EXTENSION'
+              ),
+              'safety':{
+                  'offline_analysis_only':True,
+                  'gazebo_started':False,
+                  'command_sent':False,
+                  'lift_authorized':False,
+                  'attachment_used':False,
+              },
+          }
+          Path('artifacts/rubiks_opposing_side_contact_negative_x_summary.json').write_text(json.dumps(result,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(result,indent=2,sort_keys=True))
+          PY
+
+      - name: Upload negative-X extension evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-opposing-side-contact-negative-x-evidence
+          path: |
+            artifacts/rubiks_opposing_side_contact_negative_x_candidates.tsv
+            artifacts/rubiks_opposing_side_contact_negative_x_scan.tsv
+            artifacts/rubiks_opposing_side_contact_negative_x_compatible.tsv
+            artifacts/rubiks_opposing_side_contact_negative_x_full_path.tsv
+            artifacts/rubiks_opposing_side_contact_negative_x_summary.json
+          if-no-files-found: warn
+          retention-days: 30
