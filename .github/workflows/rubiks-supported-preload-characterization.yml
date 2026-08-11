@@ -1,0 +1,222 @@
+name: Rubik supported gripper preload characterization
+
+on:
+  pull_request:
+    paths:
+      - 'bin/run_rubiks_supported_preload_characterization.py'
+      - 'bin/run_gazebo_supported_preload'
+      - '.github/workflows/rubiks-supported-preload-characterization.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  supported-preload-matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 130
+    env:
+      EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PR47_ARTIFACT_ID: '9095198965'
+      PR47_ARTIFACT_SHA256: f91b50e3ad24f2c01fcf6a7fe3f52784a97a7e2ef43473ef0ecfb59faacb2d5e
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXACT_HEAD_SHA }}
+
+      - name: Validate preload harness
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
+          python3 -m py_compile \
+            bin/run_rubiks_supported_preload_characterization.py \
+            bin/run_rubiks_dynamic_opposing_side_hold_v2.py \
+            bin/rubiks_contact_quality.py \
+            bin/run_rubiks_open_arm_pregrasp_setup.py
+          python3 bin/rubiks_contact_quality.py --self-test
+          bash -n bin/run_gazebo_supported_preload
+          python3 - <<'PY'
+          from pathlib import Path
+          text=Path('bin/run_rubiks_supported_preload_characterization.py').read_text()
+          assert '0.0065' in text and '0.00725' in text
+          assert 'finger_force_stats' in text
+          for token in ('support_removed": False','arm_command_sent": False','lift_command_sent": False','attachment_used": False'):
+              assert token in text, token
+          PY
+
+      - name: Download unsupported-failure evidence
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/pr47
+          curl --fail --location --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PR47_ARTIFACT_ID}/zip" \
+            -o artifacts/pr47.zip
+          printf '%s  %s\n' "${PR47_ARTIFACT_SHA256}" artifacts/pr47.zip | sha256sum --check --strict
+          unzip -q artifacts/pr47.zip -d artifacts/pr47
+          test -s artifacts/pr47/rubiks_unsupported_retention_summary.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          s=json.loads(Path('artifacts/pr47/rubiks_unsupported_retention_summary.json').read_text())
+          assert s['passed'] is False
+          assert s['support_removed'] is True
+          assert any('unsupported moving-cube contact quality failed' in e for e in s['errors'])
+          assert s['supported_contact_quality']['passed'] is True
+          assert s['input']['selected_translation_link7_m']==[0.0475,0.0,0.00825]
+          PY
+
+      - name: Generate four supported preload inputs
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          parent=json.loads(Path('artifacts/pr47/rubiks_unsupported_retention_summary.json').read_text())
+          base=dict(parent['input'])
+          targets=[0.00725,0.00700,0.00675,0.00650]
+          root=Path('artifacts/matrix'); root.mkdir(parents=True,exist_ok=True)
+          manifest=[]
+          for index,target in enumerate(targets):
+              label=f'q_{target:.5f}'.replace('.','p')
+              trial=root/label; trial.mkdir(parents=True,exist_ok=True)
+              gate=dict(base)
+              gate.update({
+                  'phase':'RUBIK-SUPPORTED-GRIPPER-PRELOAD-CHARACTERIZATION',
+                  'matrix_index':index,
+                  'requested_preload_target_m':target,
+                  'source_pr47_artifact_id':9095198965,
+                  'source_pr47_artifact_sha256':'f91b50e3ad24f2c01fcf6a7fe3f52784a97a7e2ef43473ef0ecfb59faacb2d5e',
+                  'support_removal_authorized':False,
+                  'arm_motion_authorized_after_fixture_spawn':False,
+                  'lift_authorized':False,
+                  'attachment_authorized':False,
+              })
+              (trial/'rubiks_supported_preload_gate_input.json').write_text(json.dumps(gate,indent=2,sort_keys=True)+'\n')
+              manifest.append({'index':index,'label':label,'target_m':target})
+          (root/'matrix_manifest.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(manifest,indent=2))
+          PY
+
+      - name: Build one minimal grasp-physics image
+        run: docker build -f Dockerfile.rubiks-physics -t lime-rubiks-preload-matrix:${EXACT_HEAD_SHA} .
+
+      - name: Run four fresh supported preload trials
+        run: |
+          set -euo pipefail
+          while read -r label target; do
+            trial="$PWD/artifacts/matrix/${label}"
+            echo "=== ${label} target=${target} ==="
+            set +e
+            docker run --rm --network host \
+              -v "${trial}:/artifacts" \
+              lime-rubiks-preload-matrix:${EXACT_HEAD_SHA} \
+              bash -lc "bash /root/bin/run_gazebo_supported_preload /artifacts ${target}" \
+              >"${trial}/container.stdout.log" 2>"${trial}/container.stderr.log"
+            status=$?
+            set -e
+            printf '%s\n' "${status}" >"${trial}/process_status.txt"
+            test -s "${trial}/rubiks_supported_preload_summary.json" || exit 2
+          done < <(python3 - <<'PY'
+          import json
+          from pathlib import Path
+          for row in json.loads(Path('artifacts/matrix/matrix_manifest.json').read_text()):
+              print(row['label'], f"{row['target_m']:.5f}")
+          PY
+          )
+
+      - name: Aggregate preload characterization
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          root=Path('artifacts/matrix')
+          manifest=json.loads((root/'matrix_manifest.json').read_text())
+          rows=[]
+          for item in manifest:
+              trial=root/item['label']
+              s=json.loads((trial/'rubiks_supported_preload_summary.json').read_text())
+              status=int((trial/'process_status.txt').read_text().strip())
+              assert abs(float(s['requested_preload_target_m'])-float(item['target_m']))<=1e-12
+              assert s['support_removed'] is False
+              assert s['arm_command_sent'] is False and s['lift_command_sent'] is False and s['attachment_used'] is False
+              q=s.get('contact_quality') or {}
+              force=s.get('contact_force') or {}
+              hold=s.get('hold_result') or {}
+              rows.append({
+                  **item,
+                  'process_status':status,
+                  'passed':s.get('passed') is True,
+                  'errors':s.get('errors') or [],
+                  'bilateral_contact_target_m':s.get('bilateral_contact_target_m'),
+                  'preload_delta_from_bilateral_m':s.get('preload_delta_from_bilateral_m'),
+                  'left_quality_fraction':(q.get('left') or {}).get('quality_fraction'),
+                  'right_quality_fraction':(q.get('right') or {}).get('quality_fraction'),
+                  'left_max_depth_m':(q.get('left') or {}).get('max_depth_m'),
+                  'right_max_depth_m':(q.get('right') or {}).get('max_depth_m'),
+                  'left_force':force.get('left'),
+                  'right_force':force.get('right'),
+                  'support_contact_ratio':hold.get('support_contact_ratio'),
+                  'bilateral_finger_contact_ratio':hold.get('bilateral_finger_contact_ratio'),
+                  'movement':hold.get('movement'),
+                  'left_joint_position_m':hold.get('left_joint_position_m'),
+                  'physical_link_separation_m':hold.get('physical_link_separation_m'),
+              })
+          passing=[row for row in rows if row['passed']]
+          selected=min(passing,key=lambda row:float(row['target_m'])) if passing else None
+          out={
+              'schema_version':1,
+              'phase':'RUBIK-SUPPORTED-GRIPPER-PRELOAD-MATRIX',
+              'trial_count':4,
+              'trials':rows,
+              'passing_trial_count':len(passing),
+              'deepest_passing_preload':selected,
+              'decision':'SUPPORTED_PRELOAD_CANDIDATE_FOUND' if selected else 'NO_SUPPORTED_PRELOAD_WITHIN_DEPTH_LIMIT',
+              'contact_quality_thresholds_unchanged':True,
+              'max_contact_depth_limit_m':0.001,
+              'support_removed':False,
+              'lift_authorized':False,
+              'attachment_authorized':False,
+          }
+          Path('artifacts/rubiks_supported_preload_matrix_summary.json').write_text(json.dumps(out,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(out,indent=2,sort_keys=True))
+          PY
+
+      - name: Validate matrix completeness and safety
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          s=json.loads(Path('artifacts/rubiks_supported_preload_matrix_summary.json').read_text())
+          assert s['trial_count']==4 and len(s['trials'])==4
+          assert s['contact_quality_thresholds_unchanged'] is True
+          assert s['max_contact_depth_limit_m']==0.001
+          assert s['support_removed'] is False
+          assert s['lift_authorized'] is False and s['attachment_authorized'] is False
+          for row in s['trials']:
+              assert row['process_status'] in (0,1)
+              if row['passed']:
+                  assert row['process_status']==0
+                  assert row['left_quality_fraction']>=0.80
+                  assert row['right_quality_fraction']>=0.80
+                  assert row['left_max_depth_m']<=0.001
+                  assert row['right_max_depth_m']<=0.001
+          print('preload matrix decision:',s['decision'])
+          PY
+
+      - name: Upload preload characterization evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-supported-preload-characterization-evidence
+          path: |
+            artifacts/rubiks_supported_preload_matrix_summary.json
+            artifacts/matrix/
+          if-no-files-found: warn
+          retention-days: 30
