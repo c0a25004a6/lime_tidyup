@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+ARTIFACT_DIR="${1:-/artifacts}"
+mkdir -p "${ARTIFACT_DIR}"
+INPUT_JSON="${ARTIFACT_DIR}/rubiks_opposing_side_dynamic_gate_input.json"
+test -s "${INPUT_JSON}"
+
+source /opt/ros/humble/setup.bash
+source /root/turtlebot3_ws/install/setup.bash
+set -u
+
+export GAZEBO_MODEL_PATH="${GAZEBO_MODEL_PATH:-}:/root/.gazebo/models:/opt/ros/humble/share/turtlebot3_gazebo/models"
+export GAZEBO_PLUGIN_PATH="${GAZEBO_PLUGIN_PATH:-}:/opt/ros/humble/lib"
+
+MODEL_NAME="turtlebot3_lime_gripper_test"
+URDF_PATH="${ARTIFACT_DIR}/turtlebot3_lime_opposing_side_hold.urdf"
+SERVER_LOG="${ARTIFACT_DIR}/rubiks_opposing_side_hold.gzserver.log"
+RSP_LOG="${ARTIFACT_DIR}/rubiks_opposing_side_hold.robot_state_publisher.log"
+SETUP_JSON="${ARTIFACT_DIR}/rubiks_opposing_side_anchor_setup.json"
+RESULT_JSON="${ARTIFACT_DIR}/rubiks_opposing_side_dynamic_supported_hold_summary.json"
+
+cleanup() {
+  status=$?
+  for pid in "${GZSERVER_PID:-}" "${RSP_PID:-}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then kill -INT "${pid}" 2>/dev/null || true; fi
+  done
+  sleep 2
+  for pid in "${GZSERVER_PID:-}" "${RSP_PID:-}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then kill -TERM "${pid}" 2>/dev/null || true; wait "${pid}" 2>/dev/null || true; fi
+  done
+  exit "${status}"
+}
+trap cleanup EXIT INT TERM
+
+ros2_service_available() {
+  local service_type
+  service_type="$(timeout 5 ros2 service type "$1" 2>/dev/null)" || return 1
+  [[ -n "${service_type}" ]]
+}
+ros2_action_available() {
+  local output padded
+  output="$(timeout 5 ros2 action list 2>/dev/null)" || return 1
+  padded=$'\n'"${output}"$'\n'
+  [[ "${padded}" == *$'\n'"$1"$'\n'* ]]
+}
+
+xacro /project/resource/turtlebot3_lime_pregrasp_hold_test.urdf.xacro >"${URDF_PATH}"
+grep -q 'libgazebo_ros2_control.so' "${URDF_PATH}"
+! grep -q 'libgazebo_grasp_fix.so' "${URDF_PATH}"
+! grep -q 'libgazebo_ros_diff_drive.so' "${URDF_PATH}"
+! grep -q 'librealsense_gazebo_plugin.so' "${URDF_PATH}"
+! grep -q 'libgazebo_ros_link_attacher.so' "${URDF_PATH}"
+
+ros2 run robot_state_publisher robot_state_publisher "${URDF_PATH}" --ros-args -p use_sim_time:=true >"${RSP_LOG}" 2>&1 &
+RSP_PID=$!
+sleep 2
+kill -0 "${RSP_PID}" 2>/dev/null || { cat "${RSP_LOG}"; exit 2; }
+
+gzserver /project/resource/rubiks_grasp_calibration.world -s libgazebo_ros_init.so -s libgazebo_ros_factory.so >"${SERVER_LOG}" 2>&1 &
+GZSERVER_PID=$!
+for _ in $(seq 1 90); do
+  ros2_service_available '/spawn_entity' && break
+  kill -0 "${GZSERVER_PID}" 2>/dev/null || { cat "${SERVER_LOG}"; exit 3; }
+  sleep 1
+done
+ros2_service_available '/spawn_entity' || { cat "${SERVER_LOG}"; exit 3; }
+
+ros2 run gazebo_ros spawn_entity.py -entity "${MODEL_NAME}" -file "${URDF_PATH}" -x 0.0 -y 0.0 -z 0.03 -Y 0.0 >"${ARTIFACT_DIR}/opposing_side.robot_spawn.log" 2>&1
+for _ in $(seq 1 90); do
+  ros2_service_available '/controller_manager/list_controllers' && break
+  kill -0 "${GZSERVER_PID}" 2>/dev/null || { cat "${SERVER_LOG}"; exit 4; }
+  sleep 1
+done
+ros2_service_available '/controller_manager/list_controllers' || { cat "${SERVER_LOG}"; exit 4; }
+
+ros2 run controller_manager spawner joint_state_broadcaster --controller-manager /controller_manager >"${ARTIFACT_DIR}/opposing_side_joint_state_broadcaster.spawner.log" 2>&1
+ros2 run controller_manager spawner arm_controller --controller-manager /controller_manager >"${ARTIFACT_DIR}/opposing_side_arm_controller.spawner.log" 2>&1
+ros2 run controller_manager spawner gripper_controller --controller-manager /controller_manager >"${ARTIFACT_DIR}/opposing_side_gripper_controller.spawner.log" 2>&1
+for _ in $(seq 1 60); do
+  if ros2_action_available '/arm_controller/follow_joint_trajectory' && ros2_action_available '/gripper_controller/gripper_cmd'; then break; fi
+  sleep 1
+done
+ros2_action_available '/arm_controller/follow_joint_trajectory' || exit 5
+ros2_action_available '/gripper_controller/gripper_cmd' || exit 5
+
+sleep 2
+python3 /root/bin/run_rubiks_open_arm_pregrasp_setup.py \
+  --input "${INPUT_JSON}" --output "${SETUP_JSON}" --arm-seconds 3.0 --timeout 12.0 \
+  >"${ARTIFACT_DIR}/rubiks_opposing_side_anchor_setup.stdout.json" \
+  2>"${ARTIFACT_DIR}/rubiks_opposing_side_anchor_setup.stderr.log"
+
+python3 /root/bin/run_rubiks_dynamic_opposing_side_hold.py \
+  --input "${INPUT_JSON}" --output "${RESULT_JSON}" \
+  --cube-sdf /project/resource/rubiks_dynamic_cube_supported_057.sdf \
+  --support-sdf /project/resource/rubiks_cube_support_surface.sdf \
+  --settle-seconds 2.0 --hold-seconds 2.0 --release-settle-seconds 1.5 \
+  --close-start 0.0185 --close-stop 0.0060 --close-step 0.00025 \
+  --step-hold 0.12 --max-effort 0.25 --timeout 10.0 \
+  >"${ARTIFACT_DIR}/rubiks_opposing_side_dynamic_hold.stdout.json" \
+  2>"${ARTIFACT_DIR}/rubiks_opposing_side_dynamic_hold.stderr.log"
