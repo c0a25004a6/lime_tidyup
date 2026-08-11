@@ -1,0 +1,208 @@
+name: Rubik pregrasp dynamic supported hold
+
+on:
+  pull_request:
+    paths:
+      - 'bin/run_rubiks_open_arm_pregrasp_setup.py'
+      - 'bin/run_gazebo_pregrasp_dynamic_supported_hold'
+      - 'project/resource/gazebo_pregrasp_hold_controller_manager.yaml'
+      - 'project/resource/turtlebot3_lime_pregrasp_hold_test.urdf.xacro'
+      - '.github/workflows/rubiks-pregrasp-dynamic-supported-hold.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  dynamic-pregrasp-hold:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      OPEN_APPROACH_ARTIFACT_ID: '9090771854'
+      OPEN_APPROACH_ARTIFACT_SHA256: 13b34ce87dd8b43155a56a286448724de2441d0ea5f6948ab8b3bb0093141b7c
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXACT_HEAD_SHA }}
+
+      - name: Validate dynamic gate harness
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
+          python3 -m py_compile \
+            bin/run_rubiks_open_arm_pregrasp_setup.py \
+            bin/run_rubiks_dynamic_supported_hold.py
+          bash -n bin/run_gazebo_pregrasp_dynamic_supported_hold
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          ET.parse('project/resource/turtlebot3_lime_pregrasp_hold_test.urdf.xacro')
+          ET.parse('project/resource/rubiks_dynamic_cube_supported_057.sdf')
+          ET.parse('project/resource/rubiks_cube_support_surface.sdf')
+          ET.parse('project/resource/rubiks_grasp_calibration.world')
+          PY
+          grep -q '<mass>0.09</mass>' project/resource/rubiks_dynamic_cube_supported_057.sdf
+          grep -q '<size>0.057 0.057 0.057</size>' project/resource/rubiks_dynamic_cube_supported_057.sdf
+          grep -q '<static>true</static>' project/resource/rubiks_cube_support_surface.sdf
+          grep -q '<size>0.075 0.040 0.010</size>' project/resource/rubiks_cube_support_surface.sdf
+          grep -q 'arm_controller' project/resource/gazebo_pregrasp_hold_controller_manager.yaml
+          grep -q 'gripper_controller' project/resource/gazebo_pregrasp_hold_controller_manager.yaml
+          ! grep -q 'libgazebo_grasp_fix.so' project/resource/turtlebot3_lime_pregrasp_hold_test.urdf.xacro
+          ! grep -q 'IFRA' project/resource/turtlebot3_lime_pregrasp_hold_test.urdf.xacro
+
+      - name: Download accepted open-approach evidence
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/open_approach
+          curl --fail --location --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${OPEN_APPROACH_ARTIFACT_ID}/zip" \
+            -o artifacts/open_approach.zip
+          printf '%s  %s\n' "${OPEN_APPROACH_ARTIFACT_SHA256}" artifacts/open_approach.zip | sha256sum --check --strict
+          unzip -q artifacts/open_approach.zip -d artifacts/open_approach
+          test -s artifacts/open_approach/rubiks_open_gripper_approach_summary.json
+          test -s artifacts/open_approach/rubiks_pregrasp_open_gripper_states.tsv
+
+      - name: Bind exact dynamic gate input
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          root=Path('artifacts/open_approach')
+          summary=json.loads((root/'rubiks_open_gripper_approach_summary.json').read_text())
+          selected=[float(v) for v in summary['selected_translation_m']]
+          assert all(abs(a-b) <= 1e-12 for a,b in zip(selected,[0.063,0.0,0.01225]))
+          assert int(summary['selected_states_checked']) == 2802
+          assert float(summary['gripper_open_m']) == 0.019
+
+          states=(root/'rubiks_pregrasp_open_gripper_states.tsv').read_text().splitlines()
+          assert len(states)==2802
+          anchor=states[1541].split('\t')
+          assert anchor[0]=='sample_001541' and len(anchor)==16
+          arm=[float(v) for v in anchor[8:14]]
+          assert abs(float(anchor[14])-0.019) <= 1e-12
+          assert abs(float(anchor[15])-0.019) <= 1e-12
+
+          cube_fixture=[-0.019,0.0,0.1192]
+          support_fixture=[-0.019,0.0,0.0857]
+          cube=[cube_fixture[i]+selected[i] for i in range(3)]
+          support=[support_fixture[i]+selected[i] for i in range(3)]
+          assert all(abs(a-b) <= 1e-12 for a,b in zip(cube,[0.044,0.0,0.13145]))
+          assert all(abs(a-b) <= 1e-12 for a,b in zip(support,[0.044,0.0,0.09795]))
+
+          gate={
+              'schema_version':1,
+              'phase':'RUBIK-PREGRASP-OPEN-APPROACH-CLOSE-DYNAMIC-NO-LIFT-EVIDENCE',
+              'source_open_approach_artifact_id':9090771854,
+              'source_open_approach_artifact_sha256':'13b34ce87dd8b43155a56a286448724de2441d0ea5f6948ab8b3bb0093141b7c',
+              'selected_translation_link7_m':selected,
+              'arm_anchor_index':1541,
+              'arm_target_rad':arm,
+              'gripper_open_m':0.019,
+              'cube_fixture_offset_link7_m':cube_fixture,
+              'support_fixture_offset_link7_m':support_fixture,
+              'cube_effective_offset_link7_m':cube,
+              'support_effective_offset_link7_m':support,
+              'cube_size_m':[0.057,0.057,0.057],
+              'cube_mass_kg':0.09,
+              'support_size_m':[0.075,0.040,0.010],
+              'lift_authorized':False,
+              'attachment_authorized':False,
+          }
+          Path('artifacts/rubiks_pregrasp_dynamic_gate_input.json').write_text(json.dumps(gate,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(gate,indent=2,sort_keys=True))
+          PY
+
+      - name: Build current Lime simulation image
+        run: docker build -t lime-pregrasp-dynamic-hold:${EXACT_HEAD_SHA} .
+
+      - name: Run open-pregrasp close-hold-release physics gate
+        run: |
+          set -euo pipefail
+          docker run --rm --network host \
+            -v "$PWD/artifacts:/artifacts" \
+            lime-pregrasp-dynamic-hold:${EXACT_HEAD_SHA} \
+            bash -lc 'bash /root/bin/run_gazebo_pregrasp_dynamic_supported_hold /artifacts' \
+            >artifacts/container.stdout.log 2>artifacts/container.stderr.log
+
+      - name: Validate combined dynamic evidence
+        run: |
+          set -euo pipefail
+          test -s artifacts/rubiks_open_arm_pregrasp_setup.json
+          test -s artifacts/rubiks_dynamic_supported_hold_telemetry.json
+          test -s artifacts/rubiks_pregrasp_dynamic_supported_hold_summary.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          s=json.loads(Path('artifacts/rubiks_pregrasp_dynamic_supported_hold_summary.json').read_text())
+          if s.get('passed') is not True:
+              raise SystemExit(s.get('errors'))
+          if s.get('gripper_open_before_arm') is not True:
+              raise SystemExit('gripper was not opened before arm motion')
+          if s.get('arm_motion_performed') is not True:
+              raise SystemExit('arm did not reach pregrasp')
+          if s.get('dynamic_hold_passed') is not True:
+              raise SystemExit('dynamic supported hold did not pass')
+          if s.get('cube_dynamic') is not True or abs(float(s.get('cube_mass_kg',0))-0.09) > 1e-12:
+              raise SystemExit('canonical 90 g dynamic cube was not tested')
+          if s.get('support_contact_before_close') is not True:
+              raise SystemExit('cube did not settle on support before close')
+          if s.get('dual_cube_contact_observed') is not True:
+              raise SystemExit('bilateral cube contact was not observed')
+          if s.get('lift_command_sent') is not False:
+              raise SystemExit('lift command must remain false')
+          if s.get('attachment_used') is not False:
+              raise SystemExit('attachment must remain false')
+          contact=s.get('contact_result') or {}
+          hold=s.get('hold_result') or {}
+          release=s.get('release_result') or {}
+          if int(contact.get('dual_contact_sample_count',0)) < 10:
+              raise SystemExit('insufficient bilateral contact samples')
+          if float(hold.get('observed_hold_seconds',0)) < 1.9:
+              raise SystemExit('hold duration too short')
+          if float(hold.get('support_contact_ratio',0)) < 0.75:
+              raise SystemExit('support contact coverage too low')
+          if float(hold.get('bilateral_finger_contact_ratio',0)) < 0.65:
+              raise SystemExit('bilateral hold coverage too low')
+          if float((hold.get('movement') or {}).get('max_vertical_rise_m',1)) > 0.0015:
+              raise SystemExit('cube rose during no-lift hold')
+          if float(release.get('support_contact_ratio',0)) < 0.75:
+              raise SystemExit('support contact did not persist after release')
+          print(json.dumps({
+              'passed':True,
+              'selected_translation_link7_m':s['input']['selected_translation_link7_m'],
+              'arm_target_rad':s['input']['arm_target_rad'],
+              'dual_contact_sample_count':contact['dual_contact_sample_count'],
+              'hold_support_ratio':hold['support_contact_ratio'],
+              'hold_bilateral_ratio':hold['bilateral_finger_contact_ratio'],
+              'max_vertical_rise_m':hold['movement']['max_vertical_rise_m'],
+              'release_support_ratio':release['support_contact_ratio'],
+              'next_phase':'RUBIK-OPEN-APPROACH-CLOSE-HOLD-INTEGRATED-DYNAMIC-NO-LIFT-EVIDENCE',
+          },indent=2))
+          PY
+
+      - name: Upload pregrasp dynamic hold evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-pregrasp-dynamic-supported-hold-evidence
+          path: |
+            artifacts/rubiks_pregrasp_dynamic_gate_input.json
+            artifacts/turtlebot3_lime_pregrasp_hold_test.urdf
+            artifacts/rubiks_open_arm_pregrasp_setup.json
+            artifacts/rubiks_open_arm_pregrasp_setup.stdout.json
+            artifacts/rubiks_open_arm_pregrasp_setup.stderr.log
+            artifacts/rubiks_dynamic_supported_hold_telemetry.json
+            artifacts/rubiks_pregrasp_dynamic_supported_hold_summary.json
+            artifacts/rubiks_pregrasp_dynamic_hold.gzserver.log
+            artifacts/rubiks_pregrasp_dynamic_hold.robot_state_publisher.log
+            artifacts/container.stdout.log
+            artifacts/container.stderr.log
+          if-no-files-found: warn
+          retention-days: 30
