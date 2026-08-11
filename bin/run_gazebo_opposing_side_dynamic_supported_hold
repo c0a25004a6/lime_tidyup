@@ -90,7 +90,7 @@ python3 /root/bin/run_rubiks_open_arm_pregrasp_setup.py \
   >"${ARTIFACT_DIR}/rubiks_opposing_side_anchor_setup.stdout.json" \
   2>"${ARTIFACT_DIR}/rubiks_opposing_side_anchor_setup.stderr.log"
 
-python3 /root/bin/run_rubiks_dynamic_opposing_side_hold.py \
+python3 /root/bin/run_rubiks_dynamic_opposing_side_hold_v2.py \
   --input "${INPUT_JSON}" --output "${RESULT_JSON}" \
   --cube-sdf /project/resource/rubiks_dynamic_cube_supported_057.sdf \
   --support-sdf /project/resource/rubiks_cube_support_surface.sdf \
