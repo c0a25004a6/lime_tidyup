@@ -2,7 +2,7 @@
 <!--
   Test-only TurtleBot3 Lime model for the pregrasp dynamic supported-hold gate.
   Arm and gripper ros2_control are enabled together. Camera, depth, lidar, IMU,
-  diff-drive, RealSense, IFRA/grasp-fix, and rendering plugins are omitted.
+  diff-drive, RealSense, link-attacher/grasp-fix, and rendering plugins are omitted.
 -->
 <robot name="turtlebot3_lime_gripper_test" xmlns:xacro="http://www.ros.org/wiki/xacro">
   <xacro:arg name="prefix" default="" />
