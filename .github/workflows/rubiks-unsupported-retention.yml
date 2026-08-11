@@ -1,0 +1,187 @@
+name: Rubik fixed-arm unsupported retention
+
+on:
+  pull_request:
+    paths:
+      - 'bin/run_rubiks_unsupported_retention.py'
+      - 'bin/run_gazebo_unsupported_retention'
+      - '.github/workflows/rubiks-unsupported-retention.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  unsupported-retention:
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+    env:
+      EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PR46_ARTIFACT_ID: '9094970088'
+      PR46_ARTIFACT_SHA256: bbd47f64c3c165a9903135f472fb999b0bf8c6db641c3664a14c803f05fa4969
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXACT_HEAD_SHA }}
+
+      - name: Validate unsupported-retention harness
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
+          python3 -m py_compile \
+            bin/run_rubiks_unsupported_retention.py \
+            bin/run_rubiks_dynamic_opposing_side_hold_v2.py \
+            bin/rubiks_contact_quality.py \
+            bin/run_rubiks_open_arm_pregrasp_setup.py
+          python3 bin/rubiks_contact_quality.py --self-test
+          bash -n bin/run_gazebo_unsupported_retention
+          python3 - <<'PY'
+          from pathlib import Path
+          text=Path('bin/run_rubiks_unsupported_retention.py').read_text()
+          assert 'DeleteEntity' in text
+          assert 'unsupported_contact_quality' in text
+          assert 'reopen_after_support_removal": False' in text
+          for token in ('arm_command_sent": False','base_command_sent": False','lift_command_sent": False','attachment_used": False','grasp_success_claimed": False'):
+              assert token in text, token
+          runner=Path('bin/run_gazebo_unsupported_retention').read_text()
+          assert '/delete_entity' in runner
+          assert 'libgazebo_grasp_fix.so' in runner
+          assert 'libgazebo_ros_link_attacher.so' in runner
+          PY
+
+      - name: Download accepted integrated no-lift evidence
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/pr46
+          curl --fail --location --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PR46_ARTIFACT_ID}/zip" \
+            -o artifacts/pr46.zip
+          printf '%s  %s\n' "${PR46_ARTIFACT_SHA256}" artifacts/pr46.zip | sha256sum --check --strict
+          unzip -q artifacts/pr46.zip -d artifacts/pr46
+          test -s artifacts/pr46/rubiks_integrated_opposing_side_no_lift_summary.json
+
+      - name: Bind exact unsupported-retention input
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          parent=json.loads(Path('artifacts/pr46/rubiks_integrated_opposing_side_no_lift_summary.json').read_text())
+          assert parent['passed'] is True and parent['errors']==[]
+          assert parent['fixture_present_during_open_arm_cycle'] is True
+          assert parent['contact_quality']['passed'] is True
+          assert float(parent['contact_quality']['left']['quality_fraction'])>=0.80
+          assert float(parent['contact_quality']['right']['quality_fraction'])>=0.80
+          assert parent['lift_command_sent'] is False and parent['attachment_used'] is False
+          gate=dict(parent['input'])
+          assert gate['selected_translation_link7_m']==[0.0475,0.0,0.00825]
+          assert gate['cube_effective_offset_link7_m']==[0.0285,0.0,0.12745]
+          assert gate['support_effective_offset_link7_m']==[0.0285,0.0,0.09395]
+          gate.update({
+              'phase':'RUBIK-FIXED-ARM-UNSUPPORTED-GRAVITY-RETENTION',
+              'source_pr46_artifact_id':9094970088,
+              'source_pr46_artifact_sha256':'bbd47f64c3c165a9903135f472fb999b0bf8c6db641c3664a14c803f05fa4969',
+              'integrated_no_lift_certified':True,
+              'unsupported_retention_seconds':1.0,
+              'arm_motion_authorized_after_fixture_spawn':False,
+              'support_removal_authorized':True,
+              'reopen_after_support_removal_authorized':False,
+              'lift_authorized':False,
+              'attachment_authorized':False,
+          })
+          Path('artifacts/rubiks_unsupported_retention_gate_input.json').write_text(json.dumps(gate,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(gate,indent=2,sort_keys=True))
+          PY
+
+      - name: Build minimal grasp-physics image
+        run: docker build -f Dockerfile.rubiks-physics -t lime-rubiks-unsupported:${EXACT_HEAD_SHA} .
+
+      - name: Run fixed-arm support withdrawal retention gate
+        run: |
+          set -euo pipefail
+          docker run --rm --network host \
+            -v "$PWD/artifacts:/artifacts" \
+            lime-rubiks-unsupported:${EXACT_HEAD_SHA} \
+            bash -lc 'bash /root/bin/run_gazebo_unsupported_retention /artifacts' \
+            >artifacts/container.stdout.log 2>artifacts/container.stderr.log
+
+      - name: Validate unsupported retention evidence
+        run: |
+          set -euo pipefail
+          test -s artifacts/rubiks_unsupported_retention_anchor_setup.json
+          test -s artifacts/rubiks_unsupported_retention_summary.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          s=json.loads(Path('artifacts/rubiks_unsupported_retention_summary.json').read_text())
+          assert s['passed'] is True, s.get('errors')
+          assert s['support_contact_before_close'] is True
+          assert s['support_removed'] is True
+          assert s['support_delete_result']['success'] is True
+          supported=s['supported_contact_quality']
+          assert supported['passed'] is True
+          assert float(supported['left']['quality_fraction'])>=0.80
+          assert float(supported['right']['quality_fraction'])>=0.80
+          unsupported=s['unsupported_contact_quality']
+          assert unsupported['passed'] is True
+          assert float(unsupported['left']['quality_fraction'])>=0.80
+          assert float(unsupported['right']['quality_fraction'])>=0.80
+          result=s['unsupported_result']
+          assert float(result['observed_seconds'])>=0.95
+          assert float(result['bilateral_finger_contact_ratio'])>=0.65
+          assert result['support_model_absent'] is True
+          movement=result['movement']
+          assert float(movement['max_horizontal_displacement_m'])<=0.003
+          assert float(movement['max_abs_vertical_displacement_m'])<=0.003
+          assert float(movement['max_rotation_rad'])<=0.10
+          assert float(result['final_cube_speed_m_s'])<=0.02
+          assert s['arm_motion_performed'] is False
+          assert s['arm_command_sent'] is False
+          assert s['base_command_sent'] is False
+          assert s['lift_command_sent'] is False
+          assert s['reopen_after_support_removal'] is False
+          assert s['attachment_used'] is False
+          assert s['physical_hardware_used'] is False
+          assert s['production_runtime_modified'] is False
+          assert s['grasp_success_claimed'] is False
+          print(json.dumps({
+              'passed':True,
+              'unsupported_seconds':result['observed_seconds'],
+              'bilateral_ratio':result['bilateral_finger_contact_ratio'],
+              'left_quality_fraction':unsupported['left']['quality_fraction'],
+              'right_quality_fraction':unsupported['right']['quality_fraction'],
+              'movement':movement,
+              'final_cube_speed_m_s':result['final_cube_speed_m_s'],
+              'next_phase':'RUBIK-UNSUPPORTED-RETENTION-REVIEW',
+          },indent=2))
+          PY
+
+      - name: Upload unsupported retention evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-unsupported-retention-evidence
+          path: |
+            artifacts/rubiks_unsupported_retention_gate_input.json
+            artifacts/turtlebot3_lime_unsupported_retention.urdf
+            artifacts/rubiks_unsupported_retention_anchor_setup.json
+            artifacts/rubiks_unsupported_retention_anchor_setup.stdout.json
+            artifacts/rubiks_unsupported_retention_anchor_setup.stderr.log
+            artifacts/rubiks_unsupported_retention_summary.json
+            artifacts/rubiks_unsupported_retention.stdout.json
+            artifacts/rubiks_unsupported_retention.stderr.log
+            artifacts/rubiks_unsupported_retention.gzserver.log
+            artifacts/rubiks_unsupported_retention.robot_state_publisher.log
+            artifacts/unsupported_retention.robot_spawn.log
+            artifacts/unsupported_joint_state_broadcaster.spawner.log
+            artifacts/unsupported_arm_controller.spawner.log
+            artifacts/unsupported_gripper_controller.spawner.log
+            artifacts/container.stdout.log
+            artifacts/container.stderr.log
+          if-no-files-found: warn
+          retention-days: 30
