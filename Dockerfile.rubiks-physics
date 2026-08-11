@@ -1,0 +1,33 @@
+FROM osrf/ros:humble-desktop-full
+SHELL ["/bin/bash", "-c"]
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    python3-colcon-common-extensions \
+    ros-humble-gazebo-ros-pkgs \
+    ros-humble-gazebo-ros2-control \
+    ros-humble-gripper-controllers \
+    ros-humble-realsense2-description \
+    ros-humble-ros2-controllers \
+    ros-humble-xacro \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /root/turtlebot3_ws/src
+RUN git clone --depth 1 --branch humble-devel \
+    https://github.com/ROBOTIS-JAPAN-GIT/turtlebot3_lime.git
+
+WORKDIR /root/turtlebot3_ws
+RUN source /opt/ros/humble/setup.bash \
+    && colcon build \
+        --merge-install \
+        --packages-select turtlebot3_lime_description \
+        --event-handlers console_direct+
+
+WORKDIR /project
+COPY project/resource /project/resource
+WORKDIR /root
+COPY bin /root/bin
+
+ENV GAZEBO_MODEL_PATH=/opt/ros/humble/share/turtlebot3_gazebo/models
+ENV GAZEBO_PLUGIN_PATH=/opt/ros/humble/lib
+WORKDIR /root
