@@ -1,0 +1,258 @@
+name: Rubik opposing-side dynamic candidate matrix
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/rubiks-opposing-side-dynamic-matrix.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  dynamic-contact-matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PR41_ARTIFACT_ID: '9093403984'
+      PR41_ARTIFACT_SHA256: 655d010b3e6004d08f3d1e58fddb38cdf16891dfe75b0d9ae5eaa5ad895f7695
+      PR37_ARTIFACT_ID: '9090771854'
+      PR37_ARTIFACT_SHA256: 13b34c0984582b5ac7e882891726744163702e74073cdc9af56287fa91e53d2b
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXACT_HEAD_SHA }}
+
+      - name: Bind accepted candidate and anchor evidence
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
+          mkdir -p artifacts/pr41 artifacts/pr37
+          curl --fail --location --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PR41_ARTIFACT_ID}/zip" \
+            -o artifacts/pr41.zip
+          printf '%s  %s\n' "${PR41_ARTIFACT_SHA256}" artifacts/pr41.zip | sha256sum --check --strict
+          unzip -q artifacts/pr41.zip -d artifacts/pr41
+
+          curl --fail --location --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PR37_ARTIFACT_ID}/zip" \
+            -o artifacts/pr37.zip
+          printf '%s  %s\n' "${PR37_ARTIFACT_SHA256}" artifacts/pr37.zip | sha256sum --check --strict
+          unzip -q artifacts/pr37.zip -d artifacts/pr37
+
+          test -s artifacts/pr41/rubiks_opposing_side_contact_negative_x_compatible.tsv
+          test -s artifacts/pr37/rubiks_pregrasp_open_gripper_states.tsv
+
+      - name: Generate four evidence-bound matrix inputs
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, math
+          from pathlib import Path
+
+          compatible=set()
+          for line in Path('artifacts/pr41/rubiks_opposing_side_contact_negative_x_compatible.tsv').read_text().splitlines():
+              f=line.split('\t')
+              if f[0]=='CANDIDATE':
+                  compatible.add(tuple(round(float(v),8) for v in f[2:5]))
+
+          candidates=[
+              ('x0525_z01425',[0.0525,0.0,0.01425]),
+              ('x0495_z01575',[0.0495,0.0,0.01575]),
+              ('x0475_z00825',[0.0475,0.0,0.00825]),
+              ('x0475_z01675',[0.0475,0.0,0.01675]),
+          ]
+          assert all(tuple(round(v,8) for v in xyz) in compatible for _,xyz in candidates)
+
+          states=Path('artifacts/pr37/rubiks_pregrasp_open_gripper_states.tsv').read_text().splitlines()
+          assert len(states)==2802
+          anchor=states[1541].split('\t')
+          assert anchor[0]=='sample_001541' and len(anchor)==16
+          arm=[float(v) for v in anchor[8:14]]
+          assert abs(float(anchor[14])-0.019)<=1e-12
+          assert abs(float(anchor[15])-0.019)<=1e-12
+
+          cube_fixture=[-0.019,0.0,0.1192]
+          support_fixture=[-0.019,0.0,0.0857]
+          root=Path('artifacts/matrix')
+          root.mkdir(parents=True,exist_ok=True)
+          manifest=[]
+          for order,(label,selected) in enumerate(candidates):
+              cube=[cube_fixture[i]+selected[i] for i in range(3)]
+              support=[support_fixture[i]+selected[i] for i in range(3)]
+              gate={
+                  'schema_version':1,
+                  'phase':'RUBIK-OPPOSING-SIDE-DYNAMIC-MATRIX-TRIAL',
+                  'matrix_order':order,
+                  'matrix_label':label,
+                  'source_pr41_artifact_id':9093403984,
+                  'source_pr41_artifact_sha256':'655d010b3e6004d08f3d1e58fddb38cdf16891dfe75b0d9ae5eaa5ad895f7695',
+                  'source_pr37_artifact_id':9090771854,
+                  'source_pr37_artifact_sha256':'13b34c0984582b5ac7e882891726744163702e74073cdc9af56287fa91e53d2b',
+                  'selected_translation_link7_m':selected,
+                  'arm_anchor_index':1541,
+                  'arm_target_rad':arm,
+                  'gripper_open_m':0.019,
+                  'cube_fixture_offset_link7_m':cube_fixture,
+                  'support_fixture_offset_link7_m':support_fixture,
+                  'cube_effective_offset_link7_m':cube,
+                  'support_effective_offset_link7_m':support,
+                  'cube_size_m':[0.057,0.057,0.057],
+                  'cube_mass_kg':0.09,
+                  'support_size_m':[0.075,0.040,0.010],
+                  'contact_quality_contract':{
+                      'opposing_y_faces':True,
+                      'edge_margin_m':0.001,
+                      'normal_y_min':0.70,
+                      'min_quality_fraction':0.80,
+                      'max_contact_depth_m':0.001,
+                  },
+                  'legacy_scalar_opening_gate_authorized':False,
+                  'lift_authorized':False,
+                  'attachment_authorized':False,
+              }
+              trial=root/label
+              trial.mkdir(parents=True,exist_ok=True)
+              (trial/'rubiks_opposing_side_dynamic_gate_input.json').write_text(json.dumps(gate,indent=2,sort_keys=True)+'\n')
+              manifest.append({'order':order,'label':label,'translation_m':selected,'cube_offset_m':cube,'support_offset_m':support})
+          (root/'matrix_manifest.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(manifest,indent=2))
+          PY
+
+      - name: Build one minimal grasp-physics image
+        run: |
+          set -euo pipefail
+          python3 -m py_compile bin/run_rubiks_dynamic_opposing_side_hold.py bin/run_rubiks_dynamic_opposing_side_hold_v2.py bin/rubiks_contact_quality.py
+          python3 bin/rubiks_contact_quality.py --self-test
+          bash -n bin/run_gazebo_opposing_side_dynamic_supported_hold
+          docker build -f Dockerfile.rubiks-physics -t lime-rubiks-dynamic-matrix:${EXACT_HEAD_SHA} .
+
+      - name: Run four fresh Gazebo trials
+        run: |
+          set -euo pipefail
+          for label in x0525_z01425 x0495_z01575 x0475_z00825 x0475_z01675; do
+            trial="$PWD/artifacts/matrix/${label}"
+            echo "=== ${label} ==="
+            set +e
+            docker run --rm --network host \
+              -v "${trial}:/artifacts" \
+              lime-rubiks-dynamic-matrix:${EXACT_HEAD_SHA} \
+              bash -lc 'bash /root/bin/run_gazebo_opposing_side_dynamic_supported_hold /artifacts' \
+              >"${trial}/container.stdout.log" 2>"${trial}/container.stderr.log"
+            status=$?
+            set -e
+            printf '%s\n' "${status}" >"${trial}/process_status.txt"
+            test -s "${trial}/rubiks_opposing_side_dynamic_supported_hold_summary.json" || {
+              echo "trial ${label} produced no structured summary" >&2
+              exit 2
+            }
+          done
+
+      - name: Aggregate matrix evidence
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          root=Path('artifacts/matrix')
+          manifest=json.loads((root/'matrix_manifest.json').read_text())
+          rows=[]
+          for item in manifest:
+              trial=root/item['label']
+              summary=json.loads((trial/'rubiks_opposing_side_dynamic_supported_hold_summary.json').read_text())
+              status=int((trial/'process_status.txt').read_text().strip())
+              inp=summary.get('input') or {}
+              assert inp.get('selected_translation_link7_m')==item['translation_m']
+              assert summary.get('lift_command_sent') is False
+              assert summary.get('ifra_attachment_used') is False
+              assert summary.get('grasp_success_claimed') is False
+              q=summary.get('contact_quality') or {}
+              hold=summary.get('hold_result') or {}
+              events=summary.get('events') or []
+              dual_target=None
+              unilateral_targets=[]
+              for event in events:
+                  if event.get('unilateral_precursor_contact'):
+                      unilateral_targets.append(event.get('target_position_m'))
+                  if event.get('dual_contact_observed') and dual_target is None:
+                      dual_target=event.get('target_position_m')
+              row={
+                  **item,
+                  'process_status':status,
+                  'passed':summary.get('passed') is True,
+                  'errors':summary.get('errors') or [],
+                  'dual_contact_observed':dual_target is not None,
+                  'first_dual_target_m':dual_target,
+                  'unilateral_precursor_targets_m':unilateral_targets,
+                  'left_quality_fraction':(q.get('left') or {}).get('quality_fraction'),
+                  'right_quality_fraction':(q.get('right') or {}).get('quality_fraction'),
+                  'left_mean_local_position_m':(q.get('left') or {}).get('mean_local_position_m'),
+                  'right_mean_local_position_m':(q.get('right') or {}).get('mean_local_position_m'),
+                  'left_mean_abs_local_normal':(q.get('left') or {}).get('mean_abs_local_normal'),
+                  'right_mean_abs_local_normal':(q.get('right') or {}).get('mean_abs_local_normal'),
+                  'support_contact_ratio':hold.get('support_contact_ratio'),
+                  'bilateral_finger_contact_ratio':hold.get('bilateral_finger_contact_ratio'),
+                  'movement':hold.get('movement'),
+              }
+              rows.append(row)
+
+          passed=[row for row in rows if row['passed']]
+          selected=passed[0] if passed else None
+          aggregate={
+              'schema_version':1,
+              'phase':'RUBIK-OPPOSING-SIDE-DYNAMIC-CANDIDATE-MATRIX',
+              'trial_count':len(rows),
+              'trials':rows,
+              'passing_candidate_count':len(passed),
+              'selected_candidate':selected,
+              'decision':'DYNAMIC_OPPOSING_SIDE_CONTACT_CANDIDATE_FOUND' if selected else 'NO_DYNAMIC_OPPOSING_SIDE_CONTACT_CANDIDATE_IN_MATRIX',
+              'acceptance_thresholds_unchanged':True,
+              'lift_authorized':False,
+              'attachment_authorized':False,
+          }
+          Path('artifacts/rubiks_dynamic_contact_matrix_summary.json').write_text(json.dumps(aggregate,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(aggregate,indent=2,sort_keys=True))
+          PY
+
+      - name: Validate matrix safety and completeness
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          s=json.loads(Path('artifacts/rubiks_dynamic_contact_matrix_summary.json').read_text())
+          assert s['trial_count']==4
+          assert len(s['trials'])==4
+          assert s['acceptance_thresholds_unchanged'] is True
+          assert s['lift_authorized'] is False
+          assert s['attachment_authorized'] is False
+          for row in s['trials']:
+              assert row['process_status'] in (0,1)
+              if row['passed']:
+                  assert row['process_status']==0
+                  assert row['dual_contact_observed'] is True
+                  assert row['left_quality_fraction'] >= 0.80
+                  assert row['right_quality_fraction'] >= 0.80
+          print('matrix decision:',s['decision'])
+          PY
+
+      - name: Upload dynamic matrix evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-opposing-side-dynamic-candidate-matrix-evidence
+          path: |
+            artifacts/rubiks_dynamic_contact_matrix_summary.json
+            artifacts/matrix/
+          if-no-files-found: warn
+          retention-days: 30
