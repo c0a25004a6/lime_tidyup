@@ -37,5 +37,6 @@ WORKDIR /opt/rubiks/bin
 COPY bin/generate_rubiks_gripper_fixture_compatibility_candidates.py .
 COPY bin/run_rubiks_gripper_fixture_x_compatibility_scan.py .
 COPY bin/summarize_rubiks_gripper_fixture_x_compatibility.py .
+COPY bin/validate_rubiks_urdf_package_resources.py .
 
 WORKDIR /work
