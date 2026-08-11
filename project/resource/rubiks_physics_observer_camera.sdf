@@ -16,8 +16,8 @@
             <format>R8G8B8</format>
           </image>
           <!-- Gazebo-native frame capture avoids ROS subscriber drops. The camera
-               evidence runner uses --lockstep so the requested 30 Hz stays synced
-               to physics even when software rendering is slower than real time. -->
+               evidence runner uses Gazebo lockstep mode so requested 30 Hz stays
+               synced to physics even when software rendering is slower than real time. -->
           <save enabled="true">
             <path>/artifacts/rubiks_preloaded_unsupported_retention_camera_frames</path>
           </save>
