@@ -1,0 +1,158 @@
+name: Rubik support width compatibility search
+
+on:
+  pull_request:
+    paths:
+      - 'bin/search_rubiks_support_width_compatibility.py'
+      - '.github/workflows/rubiks-support-width-compatibility.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  support-width-search:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PR27_ARTIFACT_ID: '8985856167'
+      PR27_ARTIFACT_SHA256: 86d2b47a2d23fa43686da5a2654ba2568ee8b83c04b14a216e8ef57d025284f3
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXACT_HEAD_SHA }}
+
+      - name: Validate command-free search boundary
+        run: |
+          set -euo pipefail
+          python3 -m py_compile bin/search_rubiks_support_width_compatibility.py
+          ! grep -RE 'ActionClient|MoveGroupInterface|FollowJointTrajectory|GripperCommand|create_publisher|create_client' \
+            bin/search_rubiks_support_width_compatibility.py
+
+      - name: Download accepted PR27 evidence
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/pr27
+          curl --fail --location --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PR27_ARTIFACT_ID}/zip" \
+            -o artifacts/pr27.zip
+          printf '%s  %s\n' "${PR27_ARTIFACT_SHA256}" artifacts/pr27.zip | sha256sum --check --strict
+          unzip -q artifacts/pr27.zip -d artifacts/pr27
+          test -s artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.urdf
+          test -s artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.srdf
+          test -s artifacts/pr27/pr26/pr23/accepted/pregrasp/rubiks_pregrasp_gripper_ground_states.tsv
+          test -s artifacts/pr27/pr26/pr23/accepted/rubiks_pregrasp_fixture_contract.tsv
+
+      - name: Build collision image
+        run: |
+          set -euo pipefail
+          docker build -f Dockerfile.rubiks-collision -t lime-rubiks-support:${EXACT_HEAD_SHA} .
+
+      - name: Search support width at unchanged accepted cube pose
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "$PWD/artifacts:/artifacts" \
+            -v "$PWD/bin:/host-bin:ro" \
+            lime-rubiks-support:${EXACT_HEAD_SHA} \
+            bash -lc '
+              set -eo pipefail
+              source /opt/ros/humble/setup.bash
+              source /opt/lime_description_ws/install/setup.bash
+              source /opt/rubiks_ws/install/setup.bash
+              set -u
+
+              python3 /opt/rubiks/bin/validate_rubiks_urdf_package_resources.py \
+                --urdf /artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.urdf
+
+              python3 /host-bin/search_rubiks_support_width_compatibility.py \
+                --fixture /artifacts/pr27/pr26/pr23/accepted/rubiks_pregrasp_fixture_contract.tsv \
+                --sweep-executable /opt/rubiks_ws/install/lib/rubiks_self_collision_preflight/rubiks_corrected_fixture_gripper_sweep_preflight \
+                --urdf /artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.urdf \
+                --srdf /artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.srdf \
+                --states /artifacts/pr27/pr26/pr23/accepted/pregrasp/rubiks_pregrasp_gripper_ground_states.tsv \
+                --work-dir /artifacts/support_width_detail \
+                --selected-fixture /artifacts/rubiks_selected_support_width_fixture.tsv \
+                --summary /artifacts/rubiks_support_width_compatibility_summary.json
+            '
+
+      - name: Full-path gate selected support geometry
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, math
+          from pathlib import Path
+          s=json.loads(Path('artifacts/rubiks_support_width_compatibility_summary.json').read_text())
+          if not s['candidate_found']:
+              raise SystemExit('no support-width candidate found')
+          x,y,z=s['center_translation_link7_m']
+          norm=math.sqrt(x*x+y*y+z*z)
+          Path('artifacts/rubiks_support_width_candidate.tsv').write_text(
+              f'META\t1\tXYZ_COMPATIBLE\t1\n'
+              f'CANDIDATE\t0\t{x:.17g}\t{y:.17g}\t{z:.17g}\t{norm:.17g}\t0\t0\t0\t0\t0\t0\n'
+          )
+          PY
+
+          docker run --rm \
+            -v "$PWD/artifacts:/artifacts" \
+            lime-rubiks-support:${EXACT_HEAD_SHA} \
+            bash -lc '
+              set -eo pipefail
+              source /opt/ros/humble/setup.bash
+              source /opt/lime_description_ws/install/setup.bash
+              source /opt/rubiks_ws/install/setup.bash
+              set -u
+              /opt/rubiks_ws/install/lib/rubiks_self_collision_preflight/rubiks_relevance_candidate_batch_preflight \
+                /artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.urdf \
+                /artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.srdf \
+                /artifacts/pr27/pr26/pr23/accepted/pregrasp/rubiks_pregrasp_gripper_ground_states.tsv \
+                /artifacts/rubiks_selected_support_width_fixture.tsv \
+                /artifacts/rubiks_support_width_candidate.tsv \
+                /artifacts/rubiks_support_width_full_path.tsv
+            '
+
+      - name: Validate combined geometry result
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          s=json.loads(Path('artifacts/rubiks_support_width_compatibility_summary.json').read_text())
+          assert s['baseline_reproduced'] is True
+          assert s['candidate_found'] is True
+          assert s['cube_pose_changed'] is False
+          assert s['selected']['dual_contact'] is True
+          assert s['selected']['forbidden_before_dual'] is False
+          select=None
+          for line in Path('artifacts/rubiks_support_width_full_path.tsv').read_text().splitlines():
+              f=line.split('\t')
+              if f[0]=='SELECT': select=f
+          assert select is not None and select[1]=='true'
+          assert int(select[7])==2802
+          print(json.dumps({
+              'support_width_m':s['selected']['support_width_m'],
+              'first_dual_q_m':s['selected']['first_dual_q_m'],
+              'full_path_clear':True,
+              'states_checked':2802,
+          },indent=2))
+          PY
+
+      - name: Upload support-width evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-support-width-compatibility-evidence
+          path: |
+            artifacts/rubiks_support_width_compatibility_summary.json
+            artifacts/rubiks_selected_support_width_fixture.tsv
+            artifacts/rubiks_support_width_candidate.tsv
+            artifacts/rubiks_support_width_full_path.tsv
+            artifacts/support_width_detail/
+          if-no-files-found: warn
+          retention-days: 30
