@@ -1,0 +1,85 @@
+<?xml version="1.0"?>
+<sdf version="1.7">
+  <world name="default">
+    <gravity>0 0 -9.8</gravity>
+    <physics type="ode">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1</real_time_factor>
+      <real_time_update_rate>1000</real_time_update_rate>
+    </physics>
+    <scene>
+      <ambient>0.7 0.7 0.7 1</ambient>
+      <background>0.16 0.18 0.22 1</background>
+      <shadows>true</shadows>
+    </scene>
+    <light name="sun" type="directional">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 4 0 0 0</pose>
+      <diffuse>0.9 0.9 0.9 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <direction>-0.4 0.2 -0.9</direction>
+    </light>
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry><plane><normal>0 0 1</normal><size>6 6</size></plane></geometry>
+          <surface>
+            <friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction>
+            <contact><ode><max_vel>0.01</max_vel><min_depth>0.0001</min_depth></ode></contact>
+          </surface>
+        </collision>
+        <visual name="visual">
+          <geometry><plane><normal>0 0 1</normal><size>6 6</size></plane></geometry>
+          <material>
+            <ambient>0.25 0.28 0.32 1</ambient>
+            <diffuse>0.25 0.28 0.32 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Fixed evidence camera. This world pose is the accepted anchor link7 pose
+         composed with the previously proven observer pose. It is intentionally
+         static and collision-free, so it cannot act on the robot or cube. -->
+    <model name="rubiks_physics_observer_camera">
+      <pose>0.18805186 -0.22000670 0.61458753 0.07996708 0.36381993 2.14316407</pose>
+      <static>true</static>
+      <link name="camera_link">
+        <sensor name="rubiks_observer" type="camera">
+          <always_on>true</always_on>
+          <update_rate>30</update_rate>
+          <visualize>false</visualize>
+          <camera name="rubiks_observer">
+            <horizontal_fov>1.3962634</horizontal_fov>
+            <image>
+              <width>640</width>
+              <height>480</height>
+              <format>R8G8B8</format>
+            </image>
+            <clip>
+              <near>0.01</near>
+              <far>5.0</far>
+            </clip>
+          </camera>
+          <plugin name="rubiks_observer_ros_camera" filename="libgazebo_ros_camera.so">
+            <ros>
+              <namespace>/rubiks_physics_camera</namespace>
+            </ros>
+            <camera_name>rubiks_observer</camera_name>
+            <frame_name>rubiks_physics_observer_camera::camera_link</frame_name>
+          </plugin>
+        </sensor>
+      </link>
+    </model>
+
+    <plugin name="gazebo_ros_state" filename="libgazebo_ros_state.so"/>
+    <gui fullscreen="false">
+      <camera name="rubiks_evidence_camera">
+        <pose>1.30 -1.30 0.90 0 0.38 2.35619</pose>
+        <view_controller>orbit</view_controller>
+        <projection_type>perspective</projection_type>
+      </camera>
+    </gui>
+  </world>
+</sdf>
