@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Prepare corrected Rubik fixture inputs for the post-PR28 static Gazebo gate.
 
-For a positive PR #28 result, apply the selected rigid translation to the
-accepted cube/support fixture contract and emit a no-actuation observation
-contract. This helper never starts ROS/Gazebo and never sends a robot command.
+For a positive PR #28 result, materialize the *effective* link7-relative cube
+and support offsets used by the accepted offline evaluator. The evaluator places
+objects at ``accepted_fixture_offset + selected_translation``; the PR #28 X
+runner's ``candidate-center`` fixture rewrite is only an internal way to reuse
+the PR #27 executable, which still adds ``center``.
+
+This helper never starts ROS/Gazebo and never sends a robot command.
 """
 from __future__ import annotations
 
@@ -62,33 +66,25 @@ def validate_summary(summary: dict[str, object]) -> list[float]:
     safety = summary.get("safety")
     require(isinstance(safety, dict), "PR28 safety block missing")
     for key in (
-        "gazebo_started",
-        "ros_node_created",
-        "object_spawned",
-        "controller_loaded",
-        "planning_request_created",
-        "trajectory_instantiated",
-        "command_sent",
-        "attachment_used",
-        "physical_hardware_used",
-        "production_runtime_modified",
+        "gazebo_started", "ros_node_created", "object_spawned", "controller_loaded",
+        "planning_request_created", "trajectory_instantiated", "command_sent",
+        "attachment_used", "physical_hardware_used", "production_runtime_modified",
     ):
         require(safety.get(key) is False, f"PR28 safety boundary violated: {key}")
     return translation
 
 
-def shift_fixture(
+def materialize_fixture(
     source: Path,
     destination: Path,
     selected_translation: list[float],
 ) -> list[dict[str, object]]:
-    """Apply PR28 translation delta to both accepted fixture OBJECT offsets.
+    """Write direct Gazebo offsets = accepted fixture offset + selected translation.
 
     Accepted fixture schema:
       META 1 link7 <...>
       OBJECT <name> <size_x> <size_y> <size_z> <off_x> <off_y> <off_z>
     """
-    shift = [selected_translation[i] - CENTER[i] for i in range(3)]
     output: list[str] = []
     objects: list[dict[str, object]] = []
 
@@ -107,14 +103,14 @@ def shift_fixture(
         require(all(math.isfinite(item) and item > 0.0 for item in dimensions), "fixture dimensions invalid")
         require(all(math.isfinite(item) for item in original), "fixture offset invalid")
 
-        corrected = [original[i] + shift[i] for i in range(3)]
-        fields[5:8] = [f"{item:.17g}" for item in corrected]
+        effective = [original[i] + selected_translation[i] for i in range(3)]
+        fields[5:8] = [f"{item:.17g}" for item in effective]
         output.append("\t".join(fields))
         objects.append({
             "name": name,
             "dimensions_m": dimensions,
-            "original_offset_link7_m": original,
-            "corrected_offset_link7_m": corrected,
+            "accepted_fixture_offset_link7_m": original,
+            "effective_offset_link7_m": effective,
         })
 
     require({str(item["name"]) for item in objects} == EXPECTED_OBJECTS, "fixture must contain exactly rubiks_cube and rubiks_support")
@@ -128,8 +124,8 @@ def build_contract(
     corrected_fixture: Path,
 ) -> dict[str, object]:
     selected = validate_summary(summary)
-    objects = shift_fixture(source_fixture, corrected_fixture, selected)
-    shift = [selected[i] - CENTER[i] for i in range(3)]
+    objects = materialize_fixture(source_fixture, corrected_fixture, selected)
+    local_scan_delta = [selected[i] - CENTER[i] for i in range(3)]
 
     return {
         "schema_version": 1,
@@ -138,7 +134,8 @@ def build_contract(
         "input_source_ref": summary.get("source_ref"),
         "reference_frame": "link7",
         "selected_translation_link7_m": selected,
-        "translation_delta_from_pr28_center_m": shift,
+        "local_scan_delta_from_pr28_center_m": local_scan_delta,
+        "placement_formula": "effective_offset = accepted_fixture_offset + selected_translation",
         "corrected_fixture_path": corrected_fixture.name,
         "objects": objects,
         "observation_contract": {
@@ -188,24 +185,15 @@ def positive_summary(translation: list[float]) -> dict[str, object]:
         "selected_candidate": {
             "translation_m": translation,
             "selected_states_checked": 2802,
-            "sweep": {
-                "open_clear": True,
-                "dual_contact": True,
-                "forbidden_before_dual": False,
-            },
+            "sweep": {"open_clear": True, "dual_contact": True, "forbidden_before_dual": False},
         },
         "next_required_phase": NEXT_PHASE,
         "safety": {
             "offline_analysis_only": True,
-            "gazebo_started": False,
-            "ros_node_created": False,
-            "object_spawned": False,
-            "controller_loaded": False,
-            "planning_request_created": False,
-            "trajectory_instantiated": False,
-            "command_sent": False,
-            "attachment_used": False,
-            "physical_hardware_used": False,
+            "gazebo_started": False, "ros_node_created": False, "object_spawned": False,
+            "controller_loaded": False, "planning_request_created": False,
+            "trajectory_instantiated": False, "command_sent": False,
+            "attachment_used": False, "physical_hardware_used": False,
             "production_runtime_modified": False,
         },
     }
@@ -220,16 +208,15 @@ def self_test() -> None:
 
         selected = [CENTER[0] - 0.0005, CENTER[1] + 0.00025, CENTER[2] + 0.001]
         contract = build_contract(positive_summary(selected), source, corrected)
-        require(
-            close_vec(contract["translation_delta_from_pr28_center_m"], [-0.0005, 0.00025, 0.001]),
-            "translation delta mismatch",
-        )
+        require(close_vec(contract["local_scan_delta_from_pr28_center_m"], [-0.0005, 0.00025, 0.001]), "local scan delta mismatch")
         objects = contract["objects"]
         require(isinstance(objects, list) and len(objects) == 2, "object count mismatch")
+
         cube = next(item for item in objects if item["name"] == "rubiks_cube")
-        require(close_vec(cube["corrected_offset_link7_m"], [-0.0195, 0.00025, 0.1202]), "cube correction mismatch")
+        require(close_vec(cube["effective_offset_link7_m"], [0.04375, 0.00025, 0.13245]), "cube effective offset mismatch")
         support = next(item for item in objects if item["name"] == "rubiks_support")
-        require(close_vec(support["corrected_offset_link7_m"], [-0.0195, 0.00025, 0.0867]), "support correction mismatch")
+        require(close_vec(support["effective_offset_link7_m"], [0.04375, 0.00025, 0.09895]), "support effective offset mismatch")
+
         require(contract["observation_contract"]["arm_command_allowed"] is False, "arm command accidentally allowed")
         require(contract["observation_contract"]["gripper_command_allowed"] is False, "gripper command accidentally allowed")
         require(contract["observation_contract"]["lift_allowed"] is False, "lift accidentally allowed")
