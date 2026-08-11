@@ -1,0 +1,30 @@
+name: Rubik 3D batch sweep compile check
+
+on:
+  pull_request:
+    paths:
+      - 'project/rubiks_self_collision_ws/src/rubiks_self_collision_preflight/CMakeLists.txt'
+      - 'project/rubiks_self_collision_ws/src/rubiks_self_collision_preflight/src/rubiks_corrected_fixture_gripper_sweep_batch_preflight.cpp'
+      - 'project/rubiks_self_collision_ws/src/rubiks_self_collision_preflight/src/rubiks_corrected_fixture_gripper_sweep_batch_preflight_v2.cpp'
+      - '.github/workflows/rubiks-3d-batch-sweep-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build collision image including batch evaluator
+        run: docker build -f Dockerfile.rubiks-collision -t rubiks-batch-check .
+      - name: Assert v2 executable installed
+        run: |
+          docker run --rm rubiks-batch-check bash -lc '
+            source /opt/ros/humble/setup.bash
+            source /opt/lime_description_ws/install/setup.bash
+            source /opt/rubiks_ws/install/setup.bash
+            test -x /opt/rubiks_ws/install/lib/rubiks_self_collision_preflight/rubiks_corrected_fixture_gripper_sweep_batch_preflight_v2
+          '
