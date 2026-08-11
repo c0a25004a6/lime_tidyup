@@ -1,0 +1,114 @@
+name: Rubik selected contact open-path certification
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/rubiks-selected-contact-open-path.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  selected-open-path:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PR43_ARTIFACT_ID: '9094116401'
+      PR43_ARTIFACT_SHA256: 6d4102ca706cedb928d9a225fd29be7cfb49a8012641753af994a1144556ae8e
+      PR27_ARTIFACT_ID: '8985856167'
+      PR27_ARTIFACT_SHA256: 86d2b47a2d23fa43686da5a2654ba2568ee8b83c04b14a216e8ef57d025284f3
+      PR37_ARTIFACT_ID: '9090771854'
+      PR37_ARTIFACT_SHA256: 13b34c0984582b5ac7e882891726744163702e74073cdc9af56287fa91e53d2b
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXACT_HEAD_SHA }}
+
+      - name: Download accepted evidence
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
+          mkdir -p artifacts/pr43 artifacts/pr27 artifacts/pr37
+          curl --fail --location --retry 3 -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PR43_ARTIFACT_ID}/zip" -o artifacts/pr43.zip
+          printf '%s  %s\n' "${PR43_ARTIFACT_SHA256}" artifacts/pr43.zip | sha256sum --check --strict
+          unzip -q artifacts/pr43.zip -d artifacts/pr43
+          curl --fail --location --retry 3 -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PR27_ARTIFACT_ID}/zip" -o artifacts/pr27.zip
+          printf '%s  %s\n' "${PR27_ARTIFACT_SHA256}" artifacts/pr27.zip | sha256sum --check --strict
+          unzip -q artifacts/pr27.zip -d artifacts/pr27
+          curl --fail --location --retry 3 -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PR37_ARTIFACT_ID}/zip" -o artifacts/pr37.zip
+          printf '%s  %s\n' "${PR37_ARTIFACT_SHA256}" artifacts/pr37.zip | sha256sum --check --strict
+          unzip -q artifacts/pr37.zip -d artifacts/pr37
+
+      - name: Bind best dynamic candidate
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, math
+          from pathlib import Path
+          m=json.loads(Path('artifacts/pr43/rubiks_dynamic_contact_matrix_summary.json').read_text())
+          passed=[r for r in m['trials'] if r['passed']]
+          assert len(passed)==4
+          selected=max(passed,key=lambda r:min(float(r['left_quality_fraction']),float(r['right_quality_fraction'])))
+          expected=[0.0475,0.0,0.00825]
+          assert all(abs(float(a)-b)<=1e-12 for a,b in zip(selected['translation_m'],expected))
+          assert min(float(selected['left_quality_fraction']),float(selected['right_quality_fraction']))>=0.806
+          x,y,z=expected
+          norm=math.sqrt(x*x+y*y+z*z)
+          Path('artifacts/selected_dynamic_candidate.json').write_text(json.dumps(selected,indent=2,sort_keys=True)+'\n')
+          Path('artifacts/selected_dynamic_candidate.tsv').write_text(
+              'META\t1\tSELECTED_DYNAMIC_CONTACT\t1\n'
+              + f'CANDIDATE\t0\t{x:.17g}\t{y:.17g}\t{z:.17g}\t{norm:.17g}\t-31\t0\t-8\t0\t0\t0\n')
+          PY
+
+      - name: Build collision image
+        run: docker build -f Dockerfile.rubiks-contact-search -t lime-rubiks-selected-path:${EXACT_HEAD_SHA} .
+
+      - name: Check fully-open 2802-state fixture path
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/artifacts:/artifacts" lime-rubiks-selected-path:${EXACT_HEAD_SHA} bash -lc '
+            source /opt/ros/humble/setup.bash
+            source /opt/lime_description_ws/install/setup.bash
+            source /opt/rubiks_ws/install/setup.bash
+            /opt/rubiks_ws/install/lib/rubiks_self_collision_preflight/rubiks_open_gripper_candidate_batch_preflight \
+              /artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.urdf \
+              /artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.srdf \
+              /artifacts/pr37/rubiks_pregrasp_open_gripper_states.tsv \
+              /artifacts/pr27/pr26/pr23/accepted/rubiks_pregrasp_fixture_contract.tsv \
+              /artifacts/selected_dynamic_candidate.tsv \
+              /artifacts/selected_dynamic_open_path.tsv'
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          select=None
+          for line in Path('artifacts/selected_dynamic_open_path.tsv').read_text().splitlines():
+              f=line.split('\t')
+              if f[0]=='SELECT': select=f
+          assert select and select[1]=='true' and int(select[7])==2802, select
+          result={'schema_version':1,'selected_translation_link7_m':[0.0475,0.0,0.00825],
+                  'open_path_clear':True,'states_checked':2802,
+                  'next_phase':'RUBIK-SELECTED-CONTACT-GAZEBO-REPEATABILITY',
+                  'lift_authorized':False,'attachment_authorized':False}
+          Path('artifacts/selected_dynamic_open_path_summary.json').write_text(json.dumps(result,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(result,indent=2))
+          PY
+
+      - name: Upload selected open-path evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-selected-contact-open-path-evidence
+          path: |
+            artifacts/selected_dynamic_candidate.json
+            artifacts/selected_dynamic_candidate.tsv
+            artifacts/selected_dynamic_open_path.tsv
+            artifacts/selected_dynamic_open_path_summary.json
+          if-no-files-found: warn
+          retention-days: 30
