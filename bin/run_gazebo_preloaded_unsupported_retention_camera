@@ -1,0 +1,215 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+ARTIFACT_DIR="${1:-/artifacts}"
+mkdir -p "${ARTIFACT_DIR}"
+INPUT_JSON="${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera_gate_input.json"
+test -s "${INPUT_JSON}"
+
+source /opt/ros/humble/setup.bash
+source /root/turtlebot3_ws/install/setup.bash
+set -u
+
+export GAZEBO_MODEL_PATH="${GAZEBO_MODEL_PATH:-}:/root/.gazebo/models:/opt/ros/humble/share/turtlebot3_gazebo/models"
+export GAZEBO_PLUGIN_PATH="${GAZEBO_PLUGIN_PATH:-}:/opt/ros/humble/lib"
+export DISPLAY=:99
+
+MODEL_NAME="turtlebot3_lime_gripper_test"
+CAMERA_MODEL="rubiks_physics_observer_camera"
+URDF_PATH="${ARTIFACT_DIR}/turtlebot3_lime_preloaded_unsupported_retention_camera.urdf"
+SERVER_LOG="${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera.gzserver.log"
+RSP_LOG="${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera.robot_state_publisher.log"
+SETUP_JSON="${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera_anchor_setup.json"
+RESULT_JSON="${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera_summary.json"
+VIDEO_PATH="${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera.mp4"
+VIDEO_METADATA="${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera_video.json"
+VIDEO_READY="${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera_video.ready"
+VIDEO_FFPROBE="${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera_ffprobe.json"
+CAMERA_TOPICS_LOG="${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera_topics.log"
+
+stop_video_recorder() {
+  local rc=0
+  if [[ -n "${CAMERA_RECORDER_PID:-}" ]] && kill -0 "${CAMERA_RECORDER_PID}" 2>/dev/null; then
+    kill -INT "${CAMERA_RECORDER_PID}" 2>/dev/null || true
+    wait "${CAMERA_RECORDER_PID}" || rc=$?
+  fi
+  CAMERA_RECORDER_PID=""
+  return "${rc}"
+}
+
+cleanup() {
+  status=$?
+  stop_video_recorder || true
+  for pid in "${GZSERVER_PID:-}" "${RSP_PID:-}" "${XVFB_PID:-}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then kill -INT "${pid}" 2>/dev/null || true; fi
+  done
+  sleep 2
+  for pid in "${GZSERVER_PID:-}" "${RSP_PID:-}" "${XVFB_PID:-}"; do
+    if [[ -n "${pid}" ]] && kill -0 "${pid}" 2>/dev/null; then kill -TERM "${pid}" 2>/dev/null || true; wait "${pid}" 2>/dev/null || true; fi
+  done
+  exit "${status}"
+}
+trap cleanup EXIT INT TERM
+
+ros2_service_available() {
+  local service_type
+  service_type="$(timeout 5 ros2 service type "$1" 2>/dev/null)" || return 1
+  [[ -n "${service_type}" ]]
+}
+ros2_action_available() {
+  local output padded
+  output="$(timeout 5 ros2 action list 2>/dev/null)" || return 1
+  padded=$'\n'"${output}"$'\n'
+  [[ "${padded}" == *$'\n'"$1"$'\n'* ]]
+}
+
+rm -f "${VIDEO_PATH}" "${VIDEO_METADATA}" "${VIDEO_READY}" "${VIDEO_FFPROBE}"
+Xvfb :99 -screen 0 1280x720x24 -nolisten tcp >"${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera.xvfb.log" 2>&1 &
+XVFB_PID=$!
+sleep 1
+kill -0 "${XVFB_PID}" 2>/dev/null || { cat "${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera.xvfb.log"; exit 2; }
+
+xacro /project/resource/turtlebot3_lime_pregrasp_hold_test.urdf.xacro >"${URDF_PATH}"
+grep -q 'libgazebo_ros2_control.so' "${URDF_PATH}"
+! grep -q 'libgazebo_grasp_fix.so' "${URDF_PATH}"
+! grep -q 'libgazebo_ros_link_attacher.so' "${URDF_PATH}"
+! grep -q 'libgazebo_ros_diff_drive.so' "${URDF_PATH}"
+
+ros2 run robot_state_publisher robot_state_publisher "${URDF_PATH}" --ros-args -p use_sim_time:=true >"${RSP_LOG}" 2>&1 &
+RSP_PID=$!
+sleep 2
+kill -0 "${RSP_PID}" 2>/dev/null || { cat "${RSP_LOG}"; exit 3; }
+
+gzserver /project/resource/rubiks_grasp_calibration.world -s libgazebo_ros_init.so -s libgazebo_ros_factory.so >"${SERVER_LOG}" 2>&1 &
+GZSERVER_PID=$!
+for _ in $(seq 1 90); do
+  if ros2_service_available '/spawn_entity' && ros2_service_available '/delete_entity'; then break; fi
+  kill -0 "${GZSERVER_PID}" 2>/dev/null || { cat "${SERVER_LOG}"; exit 4; }
+  sleep 1
+done
+ros2_service_available '/spawn_entity' || { cat "${SERVER_LOG}"; exit 4; }
+ros2_service_available '/delete_entity' || { cat "${SERVER_LOG}"; exit 4; }
+
+ros2 run gazebo_ros spawn_entity.py -entity "${MODEL_NAME}" -file "${URDF_PATH}" -x 0 -y 0 -z 0.03 -Y 0 >"${ARTIFACT_DIR}/camera_retention.robot_spawn.log" 2>&1
+for _ in $(seq 1 90); do
+  ros2_service_available '/controller_manager/list_controllers' && break
+  kill -0 "${GZSERVER_PID}" 2>/dev/null || { cat "${SERVER_LOG}"; exit 5; }
+  sleep 1
+done
+ros2_service_available '/controller_manager/list_controllers' || exit 5
+
+ros2 run controller_manager spawner joint_state_broadcaster --controller-manager /controller_manager >"${ARTIFACT_DIR}/camera_joint_state_broadcaster.spawner.log" 2>&1
+ros2 run controller_manager spawner arm_controller --controller-manager /controller_manager >"${ARTIFACT_DIR}/camera_arm_controller.spawner.log" 2>&1
+ros2 run controller_manager spawner gripper_controller --controller-manager /controller_manager >"${ARTIFACT_DIR}/camera_gripper_controller.spawner.log" 2>&1
+for _ in $(seq 1 60); do
+  if ros2_action_available '/arm_controller/follow_joint_trajectory' && ros2_action_available '/gripper_controller/gripper_cmd'; then break; fi
+  sleep 1
+done
+ros2_action_available '/arm_controller/follow_joint_trajectory' || exit 6
+ros2_action_available '/gripper_controller/gripper_cmd' || exit 6
+
+sleep 2
+python3 /root/bin/run_rubiks_open_arm_pregrasp_setup.py \
+  --input "${INPUT_JSON}" --output "${SETUP_JSON}" --arm-seconds 3.0 --timeout 12.0 \
+  >"${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera_anchor_setup.stdout.json" \
+  2>"${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera_anchor_setup.stderr.log"
+
+# Spawn after anchor setup. The model is static, so this resolves the observer pose
+# from link7 once and then leaves the camera fixed in world throughout the trial.
+# Camera +X looks toward the accepted cube candidate from a 3/4 elevated view.
+ros2 run gazebo_ros spawn_entity.py \
+  -entity "${CAMERA_MODEL}" \
+  -file /project/resource/rubiks_physics_observer_camera.sdf \
+  -reference_frame "${MODEL_NAME}::link7" \
+  -x 0.18 -y -0.22 -z 0.12 -R 0.0 -P 0.410 -Y 2.113 \
+  >"${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera.spawn.log" 2>&1
+
+CAMERA_TOPIC=""
+for _ in $(seq 1 60); do
+  timeout 5 ros2 topic list >"${CAMERA_TOPICS_LOG}" 2>&1 || true
+  CAMERA_TOPIC="$(grep -E '^/rubiks_physics_camera(/[^[:space:]]*)?/image_raw$' "${CAMERA_TOPICS_LOG}" | head -n 1 || true)"
+  if [[ -n "${CAMERA_TOPIC}" ]]; then break; fi
+  kill -0 "${GZSERVER_PID}" 2>/dev/null || { cat "${SERVER_LOG}"; exit 7; }
+  sleep 0.5
+done
+if [[ -z "${CAMERA_TOPIC}" ]]; then
+  echo 'Gazebo observer image topic not found' >&2
+  cat "${CAMERA_TOPICS_LOG}" >&2 || true
+  exit 7
+fi
+CAMERA_TOPIC_TYPE="$(timeout 5 ros2 topic type "${CAMERA_TOPIC}" 2>/dev/null || true)"
+[[ "${CAMERA_TOPIC_TYPE}" == "sensor_msgs/msg/Image" ]] || {
+  echo "unexpected camera topic type: ${CAMERA_TOPIC_TYPE}" >&2
+  exit 7
+}
+printf '%s\n' "${CAMERA_TOPIC}" >"${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera_topic.txt"
+
+python3 /root/bin/record_ros_image_mp4.py \
+  --topic "${CAMERA_TOPIC}" \
+  --output "${VIDEO_PATH}" \
+  --metadata "${VIDEO_METADATA}" \
+  --ready-file "${VIDEO_READY}" \
+  --fps 30.0 \
+  >"${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera_recorder.stdout.log" \
+  2>"${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera_recorder.stderr.log" &
+CAMERA_RECORDER_PID=$!
+for _ in $(seq 1 60); do
+  [[ -s "${VIDEO_READY}" ]] && break
+  kill -0 "${CAMERA_RECORDER_PID}" 2>/dev/null || {
+    cat "${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera_recorder.stderr.log" >&2 || true
+    exit 8
+  }
+  sleep 0.25
+done
+[[ -s "${VIDEO_READY}" ]] || { echo 'camera recorder did not receive first frame' >&2; exit 8; }
+
+set +e
+python3 /root/bin/run_rubiks_preloaded_unsupported_retention.py \
+  --input "${INPUT_JSON}" --output "${RESULT_JSON}" \
+  --cube-sdf /project/resource/rubiks_dynamic_cube_supported_057.sdf \
+  --support-sdf /project/resource/rubiks_cube_support_surface.sdf \
+  --settle-seconds 2.0 --supported-hold-seconds 1.0 --unsupported-seconds 1.0 \
+  --close-start 0.0185 --close-stop 0.0060 --close-step 0.00025 \
+  --step-hold 0.12 --max-effort 0.25 --timeout 10.0 \
+  >"${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera.stdout.json" \
+  2>"${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera.stderr.log"
+TRIAL_STATUS=$?
+set -e
+printf '%s\n' "${TRIAL_STATUS}" >"${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera_trial_exit_code.txt"
+
+sleep 0.5
+RECORDER_STATUS=0
+stop_video_recorder || RECORDER_STATUS=$?
+printf '%s\n' "${RECORDER_STATUS}" >"${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera_recorder_exit_code.txt"
+[[ "${RECORDER_STATUS}" -eq 0 ]] || exit 9
+
+ffprobe -v error \
+  -show_entries stream=codec_name,width,height,avg_frame_rate,nb_frames:format=duration,size \
+  -of json "${VIDEO_PATH}" >"${VIDEO_FFPROBE}"
+
+python3 - "${VIDEO_METADATA}" "${VIDEO_FFPROBE}" <<'PY'
+import json
+import sys
+from pathlib import Path
+meta=json.loads(Path(sys.argv[1]).read_text())
+probe=json.loads(Path(sys.argv[2]).read_text())
+assert meta['passed'] is True, meta
+assert meta['error'] is None, meta
+assert int(meta['frame_count']) >= 90, meta
+assert int(meta['width']) == 640 and int(meta['height']) == 480, meta
+assert float(meta['observed_seconds']) >= 3.0, meta
+assert float(meta['effective_receive_fps']) >= 10.0, meta
+streams=probe.get('streams') or []
+assert len(streams) == 1, probe
+stream=streams[0]
+assert int(stream['width']) == 640 and int(stream['height']) == 480, probe
+assert stream.get('codec_name') in {'mpeg4', 'h264', 'hevc'}, probe
+fmt=probe.get('format') or {}
+assert float(fmt['duration']) >= 3.0, probe
+assert int(fmt['size']) >= 10000, probe
+print(json.dumps({'camera_evidence_valid': True, 'metadata': meta, 'ffprobe': probe}, indent=2))
+PY
+
+# Preserve the physics process result. PR #50 expects the unchanged retention
+# failure; the workflow interprets that result separately from camera validity.
+exit "${TRIAL_STATUS}"
