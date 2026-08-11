@@ -34,6 +34,7 @@ RUN source /opt/ros/humble/setup.bash \
 WORKDIR /opt/rubiks/bin
 COPY bin/prepare_rubiks_grasp_followup.py .
 COPY bin/run_rubiks_gripper_fixture_3d_compatibility_scan.py .
+COPY bin/run_rubiks_gripper_fixture_3d_probe.py .
 COPY bin/summarize_rubiks_gripper_fixture_3d_compatibility.py .
 COPY bin/validate_rubiks_urdf_package_resources.py .
 
