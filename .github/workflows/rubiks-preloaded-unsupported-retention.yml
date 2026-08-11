@@ -1,0 +1,231 @@
+name: Rubik preloaded unsupported retention
+
+on:
+  pull_request:
+    paths:
+      - 'bin/run_rubiks_preloaded_unsupported_retention.py'
+      - 'bin/run_gazebo_preloaded_unsupported_retention'
+      - '.github/workflows/rubiks-preloaded-unsupported-retention.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  preloaded-unsupported-retention:
+    runs-on: ubuntu-latest
+    timeout-minutes: 105
+    env:
+      EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PRELOAD_REVIEW_ARTIFACT_ID: '9095667843'
+      PRELOAD_REVIEW_ARTIFACT_SHA256: 4d71de1777763f5459b9bc63f27eeb5f03bb90e2d84d8f02c022b91f4b6794ba
+      PR47_ARTIFACT_ID: '9095198965'
+      PR47_ARTIFACT_SHA256: f91b50e3ad24f2c01fcf6a7fe3f52784a97a7e2ef43473ef0ecfb59faacb2d5e
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXACT_HEAD_SHA }}
+
+      - name: Validate reviewed-preload retention harness
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
+          python3 -m py_compile \
+            bin/run_rubiks_preloaded_unsupported_retention.py \
+            bin/run_rubiks_unsupported_retention.py \
+            bin/run_rubiks_dynamic_opposing_side_hold_v2.py \
+            bin/rubiks_contact_quality.py \
+            bin/run_rubiks_open_arm_pregrasp_setup.py
+          python3 bin/rubiks_contact_quality.py --self-test
+          bash -n bin/run_gazebo_preloaded_unsupported_retention
+          python3 - <<'PY'
+          from pathlib import Path
+          text=Path('bin/run_rubiks_preloaded_unsupported_retention.py').read_text()
+          assert 'SELECTED_PRELOAD_M = 0.00675' in text
+          assert 'MAX_GLOBAL_DEPTH_M = 0.001' in text
+          assert 'global_depth_passed' in text
+          assert 'bilateral_preload_precursor' in text
+          runner=Path('bin/run_gazebo_preloaded_unsupported_retention').read_text()
+          assert 'run_rubiks_preloaded_unsupported_retention.py' in runner
+          assert '--max-effort 0.25' in runner
+          assert '--unsupported-seconds 1.0' in runner
+          assert 'libgazebo_grasp_fix.so' in runner
+          assert 'libgazebo_ros_link_attacher.so' in runner
+          PY
+
+      - name: Download reviewed preload and prior failure evidence
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/review artifacts/pr47
+          curl --fail --location --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PRELOAD_REVIEW_ARTIFACT_ID}/zip" \
+            -o artifacts/review.zip
+          printf '%s  %s\n' "${PRELOAD_REVIEW_ARTIFACT_SHA256}" artifacts/review.zip | sha256sum --check --strict
+          unzip -q artifacts/review.zip -d artifacts/review
+          curl --fail --location --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PR47_ARTIFACT_ID}/zip" \
+            -o artifacts/pr47.zip
+          printf '%s  %s\n' "${PR47_ARTIFACT_SHA256}" artifacts/pr47.zip | sha256sum --check --strict
+          unzip -q artifacts/pr47.zip -d artifacts/pr47
+          test -s artifacts/review/rubiks_supported_preload_evidence_review.json
+          test -s artifacts/pr47/rubiks_unsupported_retention_summary.json
+
+      - name: Bind exact q=0.00675 retry input
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          review=json.loads(Path('artifacts/review/rubiks_supported_preload_evidence_review.json').read_text())
+          assert review['decision']=='SELECT_Q_0P00675_FOR_UNSUPPORTED_RETENTION_RETRY'
+          selected=review['selected_preload']
+          assert selected['hard_passed'] is True
+          assert abs(float(selected['target_m'])-0.00675)<=1e-12
+          assert float(selected['left_max_depth_m'])<=0.001
+          assert float(selected['right_max_depth_m'])<=0.001
+          rejected=review['rejected_deeper_preload']
+          assert abs(float(rejected['target_m'])-0.0065)<=1e-12
+          assert rejected['global_depth_passed'] is False
+          assert review['thresholds_relaxed'] is False
+
+          prior=json.loads(Path('artifacts/pr47/rubiks_unsupported_retention_summary.json').read_text())
+          assert prior['passed'] is False and prior['support_removed'] is True
+          assert prior['input']['selected_translation_link7_m']==[0.0475,0.0,0.00825]
+          gate=dict(prior['input'])
+          gate.update({
+              'phase':'RUBIK-PRELOADED-FIXED-ARM-UNSUPPORTED-GRAVITY-RETENTION',
+              'source_preload_review_artifact_id':9095667843,
+              'source_preload_review_artifact_sha256':'4d71de1777763f5459b9bc63f27eeb5f03bb90e2d84d8f02c022b91f4b6794ba',
+              'source_pr47_artifact_id':9095198965,
+              'source_pr47_artifact_sha256':'f91b50e3ad24f2c01fcf6a7fe3f52784a97a7e2ef43473ef0ecfb59faacb2d5e',
+              'reviewed_preload_target_m':0.00675,
+              'reviewed_supported_left_max_depth_m':selected['left_max_depth_m'],
+              'reviewed_supported_right_max_depth_m':selected['right_max_depth_m'],
+              'reviewed_supported_left_quality_fraction':selected['left_quality_fraction'],
+              'reviewed_supported_right_quality_fraction':selected['right_quality_fraction'],
+              'global_max_depth_limit_m':0.001,
+              'unsupported_retention_seconds':1.0,
+              'arm_motion_authorized_after_fixture_spawn':False,
+              'support_removal_authorized':True,
+              'reopen_after_support_removal_authorized':False,
+              'lift_authorized':False,
+              'attachment_authorized':False,
+              'max_effort_changed_from_prior_trial':False,
+          })
+          Path('artifacts/rubiks_preloaded_unsupported_retention_gate_input.json').write_text(json.dumps(gate,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(gate,indent=2,sort_keys=True))
+          PY
+
+      - name: Build minimal grasp-physics image
+        run: docker build -f Dockerfile.rubiks-physics -t lime-rubiks-preloaded-unsupported:${EXACT_HEAD_SHA} .
+
+      - name: Run q=0.00675 preloaded support-removal trial
+        run: |
+          set -euo pipefail
+          docker run --rm --network host \
+            -v "$PWD/artifacts:/artifacts" \
+            lime-rubiks-preloaded-unsupported:${EXACT_HEAD_SHA} \
+            bash -lc 'bash /root/bin/run_gazebo_preloaded_unsupported_retention /artifacts' \
+            >artifacts/container.stdout.log 2>artifacts/container.stderr.log
+
+      - name: Validate preloaded unsupported retention
+        run: |
+          set -euo pipefail
+          test -s artifacts/rubiks_preloaded_unsupported_retention_anchor_setup.json
+          test -s artifacts/rubiks_preloaded_unsupported_retention_summary.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          s=json.loads(Path('artifacts/rubiks_preloaded_unsupported_retention_summary.json').read_text())
+          assert s['passed'] is True, s.get('errors')
+          assert s['support_contact_before_close'] is True
+          assert s['support_removed'] is True
+          assert s['support_delete_result']['success'] is True
+          events=s['events']
+          precursors=[e for e in events if e.get('bilateral_preload_precursor')]
+          reached=[e for e in events if e.get('preload_target_reached')]
+          assert precursors, 'expected earlier bilateral precursor contacts'
+          assert len(reached)==1
+          assert abs(float(reached[0]['target_position_m'])-0.00675)<=1e-12
+
+          supported=s['supported_contact_quality']
+          assert supported['passed'] is True
+          assert supported['global_depth_passed'] is True
+          assert float(supported['left']['quality_fraction'])>=0.80
+          assert float(supported['right']['quality_fraction'])>=0.80
+          assert float(supported['left']['max_depth_m'])<=0.001
+          assert float(supported['right']['max_depth_m'])<=0.001
+
+          unsupported=s['unsupported_contact_quality']
+          assert unsupported['passed'] is True
+          assert unsupported['global_depth_passed'] is True
+          assert float(unsupported['left']['quality_fraction'])>=0.80
+          assert float(unsupported['right']['quality_fraction'])>=0.80
+          assert float(unsupported['left']['max_depth_m'])<=0.001
+          assert float(unsupported['right']['max_depth_m'])<=0.001
+
+          result=s['unsupported_result']
+          assert float(result['observed_seconds'])>=0.95
+          assert float(result['bilateral_finger_contact_ratio'])>=0.65
+          assert result['support_model_absent'] is True
+          movement=result['movement']
+          assert float(movement['max_horizontal_displacement_m'])<=0.003
+          assert float(movement['max_abs_vertical_displacement_m'])<=0.003
+          assert float(movement['max_rotation_rad'])<=0.10
+          assert float(result['final_cube_speed_m_s'])<=0.02
+          assert s['arm_motion_performed'] is False
+          assert s['arm_command_sent'] is False
+          assert s['base_command_sent'] is False
+          assert s['lift_command_sent'] is False
+          assert s['reopen_after_support_removal'] is False
+          assert s['attachment_used'] is False
+          assert s['physical_hardware_used'] is False
+          assert s['production_runtime_modified'] is False
+          assert s['grasp_success_claimed'] is False
+          print(json.dumps({
+              'passed':True,
+              'preload_target_m':reached[0]['target_position_m'],
+              'unsupported_seconds':result['observed_seconds'],
+              'bilateral_ratio':result['bilateral_finger_contact_ratio'],
+              'left_quality_fraction':unsupported['left']['quality_fraction'],
+              'right_quality_fraction':unsupported['right']['quality_fraction'],
+              'left_max_depth_m':unsupported['left']['max_depth_m'],
+              'right_max_depth_m':unsupported['right']['max_depth_m'],
+              'movement':movement,
+              'final_cube_speed_m_s':result['final_cube_speed_m_s'],
+              'next_phase':'RUBIK-PRELOADED-UNSUPPORTED-RETENTION-REVIEW',
+          },indent=2))
+          PY
+
+      - name: Upload preloaded unsupported evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-preloaded-unsupported-retention-evidence
+          path: |
+            artifacts/rubiks_preloaded_unsupported_retention_gate_input.json
+            artifacts/turtlebot3_lime_preloaded_unsupported_retention.urdf
+            artifacts/rubiks_preloaded_unsupported_retention_anchor_setup.json
+            artifacts/rubiks_preloaded_unsupported_retention_anchor_setup.stdout.json
+            artifacts/rubiks_preloaded_unsupported_retention_anchor_setup.stderr.log
+            artifacts/rubiks_preloaded_unsupported_retention_summary.json
+            artifacts/rubiks_preloaded_unsupported_retention.stdout.json
+            artifacts/rubiks_preloaded_unsupported_retention.stderr.log
+            artifacts/rubiks_preloaded_unsupported_retention.gzserver.log
+            artifacts/rubiks_preloaded_unsupported_retention.robot_state_publisher.log
+            artifacts/preloaded_unsupported_retention.robot_spawn.log
+            artifacts/preloaded_joint_state_broadcaster.spawner.log
+            artifacts/preloaded_arm_controller.spawner.log
+            artifacts/preloaded_gripper_controller.spawner.log
+            artifacts/container.stdout.log
+            artifacts/container.stderr.log
+          if-no-files-found: warn
+          retention-days: 30
