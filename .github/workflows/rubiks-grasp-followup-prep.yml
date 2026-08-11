@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'bin/prepare_rubiks_grasp_followup.py'
+      - 'bin/prepare_rubiks_static_fixture_contract.py'
       - 'doc/rubiks_grasp_followup_prep.md'
       - '.github/workflows/rubiks-grasp-followup-prep.yml'
   workflow_dispatch:
@@ -18,17 +19,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Compile follow-up router
-        run: python3 -m py_compile bin/prepare_rubiks_grasp_followup.py
+      - name: Compile follow-up preparation
+        run: |
+          python3 -m py_compile \
+            bin/prepare_rubiks_grasp_followup.py \
+            bin/prepare_rubiks_static_fixture_contract.py
 
-      - name: Run dependency-free self-test
-        run: python3 bin/prepare_rubiks_grasp_followup.py --self-test
+      - name: Run dependency-free self-tests
+        run: |
+          python3 bin/prepare_rubiks_grasp_followup.py --self-test
+          python3 bin/prepare_rubiks_static_fixture_contract.py --self-test
 
       - name: Assert command-free implementation boundary
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          source = Path('bin/prepare_rubiks_grasp_followup.py').read_text()
+          paths = (
+              Path('bin/prepare_rubiks_grasp_followup.py'),
+              Path('bin/prepare_rubiks_static_fixture_contract.py'),
+          )
           forbidden = (
               'ActionClient(',
               'MoveGroupInterface',
@@ -39,16 +48,27 @@ jobs:
               'subprocess.run(',
               'os.system(',
           )
-          for token in forbidden:
-              if token in source:
-                  raise SystemExit(f'follow-up prep contains executable/command path: {token}')
-          required = (
+          for path in paths:
+              source = path.read_text()
+              for token in forbidden:
+                  if token in source:
+                      raise SystemExit(f'{path} contains executable/command path: {token}')
+          router = paths[0].read_text()
+          for token in (
               'REMAINING_3D_COUNT',
               'STATIC_GAZEBO_NO_ACTUATION',
               'LOCAL_3D_EXPANSION',
               'lift_allowed_in_next_phase',
-          )
-          for token in required:
-              if token not in source:
-                  raise SystemExit(f'follow-up prep lacks required boundary token: {token}')
+          ):
+              if token not in router:
+                  raise SystemExit(f'follow-up router lacks required boundary token: {token}')
+          fixture = paths[1].read_text()
+          for token in (
+              'fixture_spawn_allowed',
+              'arm_command_allowed',
+              'gripper_command_allowed',
+              'grasp_success_claimed',
+          ):
+              if token not in fixture:
+                  raise SystemExit(f'static fixture contract lacks required boundary token: {token}')
           PY
