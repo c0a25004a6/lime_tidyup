@@ -3,6 +3,7 @@ name: Rubik integrated no-lift prep
 on:
   pull_request:
     paths:
+      - 'Dockerfile.rubiks-physics'
       - 'bin/run_rubiks_integrated_dynamic_no_lift.py'
       - 'bin/run_gazebo_integrated_dynamic_no_lift'
       - '.github/workflows/rubiks-integrated-no-lift-prep.yml'
@@ -65,3 +66,40 @@ jobs:
               if token in sh:
                   raise SystemExit(f'forbidden integrated wrapper token: {token}')
           PY
+
+  minimal-physics-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build grasp-only physics image
+        run: |
+          set -euo pipefail
+          docker build -f Dockerfile.rubiks-physics -t lime-rubiks-physics:test .
+          docker image ls lime-rubiks-physics:test
+      - name: Smoke test required runtime resources
+        run: |
+          set -euo pipefail
+          docker run --rm lime-rubiks-physics:test bash -lc '
+            set -eo pipefail
+            source /opt/ros/humble/setup.bash
+            source /root/turtlebot3_ws/install/setup.bash
+            command -v gzserver
+            command -v xacro
+            ros2 pkg prefix gazebo_ros
+            ros2 pkg prefix gazebo_ros2_control
+            ros2 pkg prefix controller_manager
+            ros2 pkg prefix gripper_controllers
+            ros2 pkg prefix turtlebot3_lime_description
+            test -f /opt/ros/humble/lib/libgazebo_ros_state.so
+            test -f /opt/ros/humble/lib/libgazebo_ros_bumper.so
+            test -f /opt/ros/humble/lib/libgazebo_ros2_control.so
+            xacro /project/resource/turtlebot3_lime_pregrasp_hold_test.urdf.xacro >/tmp/test.urdf
+            grep -q libgazebo_ros2_control.so /tmp/test.urdf
+            ! grep -q libgazebo_grasp_fix.so /tmp/test.urdf
+            ! grep -q libgazebo_ros_link_attacher.so /tmp/test.urdf
+            python3 -m py_compile \
+              /root/bin/run_rubiks_open_arm_pregrasp_setup.py \
+              /root/bin/run_rubiks_dynamic_supported_hold.py \
+              /root/bin/run_rubiks_integrated_dynamic_no_lift.py
+          '
