@@ -1,0 +1,243 @@
+name: Rubik opposing-side dynamic supported hold
+
+on:
+  pull_request:
+    paths:
+      - 'Dockerfile.rubiks-physics'
+      - 'bin/rubiks_contact_quality.py'
+      - 'bin/run_rubiks_dynamic_opposing_side_hold.py'
+      - 'bin/run_gazebo_opposing_side_dynamic_supported_hold'
+      - 'bin/run_rubiks_open_arm_pregrasp_setup.py'
+      - 'project/resource/turtlebot3_lime_pregrasp_hold_test.urdf.xacro'
+      - 'project/resource/gazebo_pregrasp_hold_controller_manager.yaml'
+      - 'project/resource/rubiks_dynamic_cube_supported_057.sdf'
+      - 'project/resource/rubiks_cube_support_surface.sdf'
+      - '.github/workflows/rubiks-opposing-side-dynamic-supported-hold.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  opposing-side-dynamic-hold:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PR41_ARTIFACT_ID: '9093403984'
+      PR41_ARTIFACT_SHA256: 655d010b3e6004d08f3d1e58fddb38cdf16891dfe75b0d9ae5eaa5ad895f7695
+      PR37_ARTIFACT_ID: '9090771854'
+      PR37_ARTIFACT_SHA256: 13b34c0984582b5ac7e882891726744163702e74073cdc9af56287fa91e53d2b
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXACT_HEAD_SHA }}
+
+      - name: Validate physics harness and direct contact gate
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
+          python3 -m py_compile \
+            bin/rubiks_contact_quality.py \
+            bin/run_rubiks_dynamic_opposing_side_hold.py \
+            bin/run_rubiks_open_arm_pregrasp_setup.py
+          python3 bin/rubiks_contact_quality.py --self-test
+          bash -n bin/run_gazebo_opposing_side_dynamic_supported_hold
+          python3 - <<'PY'
+          from pathlib import Path
+          text=Path('bin/run_rubiks_dynamic_opposing_side_hold.py').read_text()
+          assert 'audit_contact_quality' in text
+          assert 'legacy_scalar_opening_gate_used' in text
+          assert 'legacy_scalar_opening_gate_used": False' in text
+          assert 'lift_command_sent": False' in text
+          assert 'ifra_attachment_used": False' in text
+          runner=Path('bin/run_gazebo_opposing_side_dynamic_supported_hold').read_text()
+          assert "libgazebo_grasp_fix.so" in runner
+          assert "libgazebo_ros_link_attacher.so" in runner
+          PY
+
+      - name: Download selected PR41 contact and open-path evidence
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/pr41
+          curl --fail --location --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PR41_ARTIFACT_ID}/zip" \
+            -o artifacts/pr41.zip
+          printf '%s  %s\n' "${PR41_ARTIFACT_SHA256}" artifacts/pr41.zip | sha256sum --check --strict
+          unzip -q artifacts/pr41.zip -d artifacts/pr41
+          test -s artifacts/pr41/rubiks_opposing_side_contact_negative_x_summary.json
+          test -s artifacts/pr41/rubiks_opposing_side_contact_negative_x_full_path.tsv
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          s=json.loads(Path('artifacts/pr41/rubiks_opposing_side_contact_negative_x_summary.json').read_text())
+          assert s['decision']=='OPPOSING_SIDE_CONTACT_AND_OPEN_APPROACH_CLEAR_FOUND'
+          assert s['quality_candidate_count']==45
+          sel=s['full_path_select']
+          assert sel['found'] is True
+          assert sel['selected_states_checked']==2802
+          expected=[0.055,0.0,0.01425]
+          assert all(abs(float(a)-b)<=1e-12 for a,b in zip(sel['translation_m'],expected))
+          PY
+
+      - name: Download accepted PR37 open-state evidence
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/pr37
+          curl --fail --location --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PR37_ARTIFACT_ID}/zip" \
+            -o artifacts/pr37.zip
+          printf '%s  %s\n' "${PR37_ARTIFACT_SHA256}" artifacts/pr37.zip | sha256sum --check --strict
+          unzip -q artifacts/pr37.zip -d artifacts/pr37
+          test -s artifacts/pr37/rubiks_pregrasp_open_gripper_states.tsv
+
+      - name: Bind exact Gazebo gate input
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          pr41=json.loads(Path('artifacts/pr41/rubiks_opposing_side_contact_negative_x_summary.json').read_text())
+          selected=[float(v) for v in pr41['full_path_select']['translation_m']]
+          states=Path('artifacts/pr37/rubiks_pregrasp_open_gripper_states.tsv').read_text().splitlines()
+          assert len(states)==2802
+          anchor=states[1541].split('\t')
+          assert anchor[0]=='sample_001541' and len(anchor)==16
+          arm=[float(v) for v in anchor[8:14]]
+          assert abs(float(anchor[14])-0.019)<=1e-12
+          assert abs(float(anchor[15])-0.019)<=1e-12
+
+          cube_fixture=[-0.019,0.0,0.1192]
+          support_fixture=[-0.019,0.0,0.0857]
+          cube=[cube_fixture[i]+selected[i] for i in range(3)]
+          support=[support_fixture[i]+selected[i] for i in range(3)]
+          assert all(abs(a-b)<=1e-12 for a,b in zip(cube,[0.036,0.0,0.13345]))
+          assert all(abs(a-b)<=1e-12 for a,b in zip(support,[0.036,0.0,0.09995]))
+
+          gate={
+              'schema_version':1,
+              'phase':'RUBIK-OPPOSING-SIDE-DYNAMIC-SUPPORTED-HOLD',
+              'source_pr41_artifact_id':9093403984,
+              'source_pr41_artifact_sha256':'655d010b3e6004d08f3d1e58fddb38cdf16891dfe75b0d9ae5eaa5ad895f7695',
+              'source_pr37_artifact_id':9090771854,
+              'source_pr37_artifact_sha256':'13b34c0984582b5ac7e882891726744163702e74073cdc9af56287fa91e53d2b',
+              'selected_translation_link7_m':selected,
+              'arm_anchor_index':1541,
+              'arm_target_rad':arm,
+              'gripper_open_m':0.019,
+              'cube_fixture_offset_link7_m':cube_fixture,
+              'support_fixture_offset_link7_m':support_fixture,
+              'cube_effective_offset_link7_m':cube,
+              'support_effective_offset_link7_m':support,
+              'cube_size_m':[0.057,0.057,0.057],
+              'cube_mass_kg':0.09,
+              'support_size_m':[0.075,0.040,0.010],
+              'contact_quality_contract':{
+                  'opposing_y_faces':True,
+                  'edge_margin_m':0.001,
+                  'normal_y_min':0.70,
+                  'min_quality_fraction':0.80,
+                  'max_contact_depth_m':0.001,
+              },
+              'legacy_scalar_opening_gate_authorized':False,
+              'lift_authorized':False,
+              'attachment_authorized':False,
+          }
+          Path('artifacts/rubiks_opposing_side_dynamic_gate_input.json').write_text(json.dumps(gate,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(gate,indent=2,sort_keys=True))
+          PY
+
+      - name: Build minimal grasp-physics image
+        run: |
+          set -euo pipefail
+          docker build -f Dockerfile.rubiks-physics -t lime-rubiks-opposing-physics:${EXACT_HEAD_SHA} .
+
+      - name: Run opposing-side Gazebo close hold release gate
+        run: |
+          set -euo pipefail
+          docker run --rm --network host \
+            -v "$PWD/artifacts:/artifacts" \
+            lime-rubiks-opposing-physics:${EXACT_HEAD_SHA} \
+            bash -lc 'bash /root/bin/run_gazebo_opposing_side_dynamic_supported_hold /artifacts' \
+            >artifacts/container.stdout.log 2>artifacts/container.stderr.log
+
+      - name: Validate direct dynamic contact quality
+        run: |
+          set -euo pipefail
+          test -s artifacts/rubiks_opposing_side_anchor_setup.json
+          test -s artifacts/rubiks_opposing_side_dynamic_supported_hold_summary.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          s=json.loads(Path('artifacts/rubiks_opposing_side_dynamic_supported_hold_summary.json').read_text())
+          assert s['passed'] is True, s.get('errors')
+          assert s['support_contact_before_close'] is True
+          assert s['contact_cleared_after_reopen'] is True
+          assert s['lift_command_sent'] is False
+          assert s['ifra_attachment_used'] is False
+          assert s['grasp_success_claimed'] is False
+          q=s['contact_quality']
+          assert q['passed'] is True
+          assert q['left']['quality_fraction'] >= 0.80
+          assert q['right']['quality_fraction'] >= 0.80
+          assert q['left']['total_contact_points'] >= 10
+          assert q['right']['total_contact_points'] >= 10
+          assert q['left']['max_depth_m'] <= 0.001
+          assert q['right']['max_depth_m'] <= 0.001
+          hold=s['hold_result']
+          assert hold['observed_hold_seconds'] >= 1.9
+          assert hold['support_contact_ratio'] >= 0.75
+          assert hold['bilateral_finger_contact_ratio'] >= 0.65
+          assert hold['movement']['max_horizontal_displacement_m'] <= 0.003
+          assert hold['movement']['max_vertical_rise_m'] <= 0.0015
+          assert hold['movement']['max_rotation_rad'] <= 0.10
+          release=s['release_result']
+          assert release['support_contact_ratio'] >= 0.75
+          print(json.dumps({
+              'passed':True,
+              'selected_translation_link7_m':s['input']['selected_translation_link7_m'],
+              'left_quality_fraction':q['left']['quality_fraction'],
+              'right_quality_fraction':q['right']['quality_fraction'],
+              'left_mean_local_position_m':q['left']['mean_local_position_m'],
+              'right_mean_local_position_m':q['right']['mean_local_position_m'],
+              'left_mean_abs_local_normal':q['left']['mean_abs_local_normal'],
+              'right_mean_abs_local_normal':q['right']['mean_abs_local_normal'],
+              'hold_support_ratio':hold['support_contact_ratio'],
+              'hold_bilateral_ratio':hold['bilateral_finger_contact_ratio'],
+              'next_phase':'RUBIK-INTEGRATED-FIXTURE-PRESENT-OPEN-APPROACH-CLOSE-HOLD-NO-LIFT',
+          },indent=2))
+          PY
+
+      - name: Upload opposing-side Gazebo evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-opposing-side-dynamic-supported-hold-evidence
+          path: |
+            artifacts/rubiks_opposing_side_dynamic_gate_input.json
+            artifacts/turtlebot3_lime_opposing_side_hold.urdf
+            artifacts/rubiks_opposing_side_anchor_setup.json
+            artifacts/rubiks_opposing_side_anchor_setup.stdout.json
+            artifacts/rubiks_opposing_side_anchor_setup.stderr.log
+            artifacts/rubiks_opposing_side_dynamic_supported_hold_summary.json
+            artifacts/rubiks_opposing_side_dynamic_hold.stdout.json
+            artifacts/rubiks_opposing_side_dynamic_hold.stderr.log
+            artifacts/rubiks_opposing_side_hold.gzserver.log
+            artifacts/rubiks_opposing_side_hold.robot_state_publisher.log
+            artifacts/opposing_side.robot_spawn.log
+            artifacts/opposing_side_joint_state_broadcaster.spawner.log
+            artifacts/opposing_side_arm_controller.spawner.log
+            artifacts/opposing_side_gripper_controller.spawner.log
+            artifacts/container.stdout.log
+            artifacts/container.stderr.log
+          if-no-files-found: warn
+          retention-days: 30
