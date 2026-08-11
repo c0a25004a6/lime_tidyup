@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'Dockerfile.rubiks-physics'
+      - 'bin/rubiks_contact_quality.py'
       - 'bin/run_rubiks_integrated_dynamic_no_lift.py'
       - 'bin/run_gazebo_integrated_dynamic_no_lift'
       - '.github/workflows/rubiks-integrated-no-lift-prep.yml'
@@ -21,11 +22,15 @@ jobs:
       - name: Validate integrated fixture-present harness
         run: |
           set -euo pipefail
-          python3 -m py_compile bin/run_rubiks_integrated_dynamic_no_lift.py
+          python3 -m py_compile \
+            bin/rubiks_contact_quality.py \
+            bin/run_rubiks_integrated_dynamic_no_lift.py
+          python3 bin/rubiks_contact_quality.py --self-test
           bash -n bin/run_gazebo_integrated_dynamic_no_lift
           python3 - <<'PY'
           from pathlib import Path
           py=Path('bin/run_rubiks_integrated_dynamic_no_lift.py').read_text()
+          quality=Path('bin/rubiks_contact_quality.py').read_text()
           sh=Path('bin/run_gazebo_integrated_dynamic_no_lift').read_text()
           required_py=(
               'integrated_open_return_zero',
@@ -42,6 +47,17 @@ jobs:
           for token in required_py:
               if token not in py:
                   raise SystemExit(f'missing integrated gate token: {token}')
+          for token in (
+              'FACE_TOLERANCE_M = 0.0010',
+              'EDGE_MARGIN_M = 0.0010',
+              'NORMAL_Y_MIN = 0.70',
+              'MAX_CONTACT_DEPTH_M = 0.0010',
+              'MIN_QUALITY_FRACTION = 0.80',
+              'world_to_cube_point',
+              'world_to_cube_vector',
+          ):
+              if token not in quality:
+                  raise SystemExit(f'missing contact-quality token: {token}')
           required_sh=(
               'run_rubiks_open_arm_pregrasp_setup.py',
               'run_rubiks_integrated_dynamic_no_lift.py',
@@ -60,7 +76,7 @@ jobs:
               'attach_link',
           )
           for token in forbidden_py:
-              if token in py:
+              if token in py or token in quality:
                   raise SystemExit(f'forbidden integrated gate token: {token}')
           for token in ('IFRA_LinkAttacher', '/cmd_vel', 'attach_link'):
               if token in sh:
@@ -99,7 +115,9 @@ jobs:
             ! grep -q libgazebo_grasp_fix.so /tmp/test.urdf
             ! grep -q libgazebo_ros_link_attacher.so /tmp/test.urdf
             python3 -m py_compile \
+              /root/bin/rubiks_contact_quality.py \
               /root/bin/run_rubiks_open_arm_pregrasp_setup.py \
               /root/bin/run_rubiks_dynamic_supported_hold.py \
               /root/bin/run_rubiks_integrated_dynamic_no_lift.py
+            python3 /root/bin/rubiks_contact_quality.py --self-test
           '
