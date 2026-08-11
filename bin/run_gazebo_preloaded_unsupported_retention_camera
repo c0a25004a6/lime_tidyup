@@ -15,7 +15,6 @@ export GAZEBO_PLUGIN_PATH="${GAZEBO_PLUGIN_PATH:-}:/opt/ros/humble/lib"
 export DISPLAY=:99
 
 MODEL_NAME="turtlebot3_lime_gripper_test"
-CAMERA_MODEL="rubiks_physics_observer_camera"
 URDF_PATH="${ARTIFACT_DIR}/turtlebot3_lime_preloaded_unsupported_retention_camera.urdf"
 SERVER_LOG="${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera.gzserver.log"
 RSP_LOG="${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera.robot_state_publisher.log"
@@ -88,9 +87,11 @@ RSP_PID=$!
 sleep 2
 kill -0 "${RSP_PID}" 2>/dev/null || { cat "${RSP_LOG}"; exit 3; }
 
-# Lockstep is evidence scheduling only: it makes physics wait for camera sensor
-# updates but does not alter the robot, cube, contact, or controller parameters.
-gzserver --lockstep /project/resource/rubiks_grasp_calibration.world -s libgazebo_ros_init.so -s libgazebo_ros_factory.so >"${SERVER_LOG}" 2>&1 &
+# The evidence camera is part of the world from simulation startup. Lockstep can
+# register it before world stepping begins instead of discovering a rendering
+# sensor only after dynamic model insertion.
+gzserver --lockstep /project/resource/rubiks_grasp_calibration_camera.world \
+  -s libgazebo_ros_init.so -s libgazebo_ros_factory.so >"${SERVER_LOG}" 2>&1 &
 GZSERVER_PID=$!
 for _ in $(seq 1 120); do
   if ros2_service_available '/spawn_entity' && ros2_service_available '/delete_entity'; then break; fi
@@ -124,15 +125,6 @@ python3 /root/bin/run_rubiks_open_arm_pregrasp_setup.py \
   >"${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera_anchor_setup.stdout.json" \
   2>"${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera_anchor_setup.stderr.log"
 
-# Keep the proven first-run observer pose. The static model is resolved relative
-# to link7 at the accepted anchor and remains fixed in world for the whole trial.
-ros2 run gazebo_ros spawn_entity.py \
-  -entity "${CAMERA_MODEL}" \
-  -file /project/resource/rubiks_physics_observer_camera.sdf \
-  -reference_frame "${MODEL_NAME}::link7" \
-  -x 0.18 -y -0.22 -z 0.12 -R 0.0 -P 0.410 -Y 2.113 \
-  >"${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera.spawn.log" 2>&1
-
 CAMERA_RAW_TOPIC=""
 CAMERA_COMPRESSED_TOPIC=""
 for _ in $(seq 1 90); do
@@ -153,9 +145,9 @@ fi
 printf '%s\n' "${CAMERA_RAW_TOPIC}" >"${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera_topic.txt"
 printf '%s\n' "${CAMERA_COMPRESSED_TOPIC}" >"${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera_compressed_topic.txt"
 
-# Subscribe to image_transport's compressed JPEG output. The recorder writes the
-# already-compressed bytes directly and performs no decode or re-encode while the
-# physics trial is running.
+# image_transport already performs JPEG compression inside the ROS camera path.
+# The recorder writes those JPEG bytes directly and performs no decode/re-encode
+# while the physics trial runs.
 python3 /root/bin/record_ros_compressed_frames.py \
   --topic "${CAMERA_COMPRESSED_TOPIC}" \
   --output-dir "${FRAME_DIR}" \
@@ -189,7 +181,6 @@ TRIAL_STATUS=$?
 set -e
 printf '%s\n' "${TRIAL_STATUS}" >"${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera_trial_exit_code.txt"
 
-# Keep a short post-trial tail, then finalize the subscriber before stopping Gazebo.
 sleep 0.25
 RECORDER_STATUS=0
 stop_camera_recorder || RECORDER_STATUS=$?
@@ -201,7 +192,6 @@ FRAME_COUNT="$(find "${FRAME_DIR}" -maxdepth 1 -type f -name 'frame_*.jpg' | wc 
 printf '%s\n' "${FRAME_COUNT}" >"${ARTIFACT_DIR}/rubiks_preloaded_unsupported_retention_camera_frame_count.txt"
 [[ "${FRAME_COUNT}" -gt 0 ]] || { echo 'no compressed Gazebo camera frames after trial' >&2; exit 9; }
 
-# Stop Gazebo before encoding so the physics evidence is immutable.
 if kill -0 "${GZSERVER_PID}" 2>/dev/null; then
   kill -INT "${GZSERVER_PID}" 2>/dev/null || true
   wait "${GZSERVER_PID}" 2>/dev/null || true
@@ -214,8 +204,7 @@ ffmpeg -y -loglevel error \
   -c:v libx264 -preset veryfast -crf 20 -pix_fmt yuv420p \
   "${VIDEO_PATH}"
 
-# Review-only crop: same captured Gazebo pixels, magnified around the accepted
-# cube / finger region. The unmodified full-frame MP4 remains the evidence source.
+# Review-only close-up. The raw full-frame MP4 remains the primary evidence.
 ffmpeg -y -loglevel error -i "${VIDEO_PATH}" \
   -vf 'crop=320:240:0:0,scale=640:480:flags=lanczos' \
   -c:v libx264 -preset veryfast -crf 18 -pix_fmt yuv420p \
@@ -240,6 +229,7 @@ fmt=probe.get('format') or {}
 payload={
     'schema_version':3,
     'capture_source':'GAZEBO_ROS_CAMERA_COMPRESSED_JPEG',
+    'camera_world_startup':True,
     'gazebo_lockstep':True,
     'camera_update_rate_hz':30.0,
     'compressed_topic':capture['topic'],
@@ -274,8 +264,6 @@ Path(sys.argv[2]).write_text(json.dumps(payload,indent=2)+'\n')
 print(json.dumps(payload,indent=2))
 PY
 
-# Preserve representative actual JPEGs but avoid uploading the full frame set
-# after both MP4s and their frame counts have been finalized.
 python3 - "${FRAME_DIR}" "${ARTIFACT_DIR}" <<'PY'
 import shutil
 import sys
