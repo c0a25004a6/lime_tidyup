@@ -1,0 +1,51 @@
+name: Rubik integrated no-lift prep
+
+on:
+  pull_request:
+    paths:
+      - 'bin/run_rubiks_integrated_dynamic_no_lift.py'
+      - '.github/workflows/rubiks-integrated-no-lift-prep.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static-integrated-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate integrated fixture-present harness
+        run: |
+          set -euo pipefail
+          python3 -m py_compile bin/run_rubiks_integrated_dynamic_no_lift.py
+          python3 - <<'PY'
+          from pathlib import Path
+          source=Path('bin/run_rubiks_integrated_dynamic_no_lift.py').read_text()
+          required=(
+              'integrated_open_return_zero',
+              'integrated_open_approach_anchor',
+              'fixture_present_during_open_arm_cycle',
+              'integrated_close_step_',
+              'integrated_supported_hold',
+              'integrated_reopen',
+              'lift_command_sent": False',
+              'attachment_used": False',
+              'base_command_sent": False',
+              'grasp_success_claimed": False',
+          )
+          for token in required:
+              if token not in source:
+                  raise SystemExit(f'missing integrated gate token: {token}')
+          forbidden=(
+              'libgazebo_grasp_fix.so',
+              'IFRA_LinkAttacher',
+              '/cmd_vel',
+              'Attach(',
+              'attach_link',
+          )
+          for token in forbidden:
+              if token in source:
+                  raise SystemExit(f'forbidden integrated gate token: {token}')
+          PY
