@@ -1,0 +1,182 @@
+name: Rubik selected contact Gazebo repeatability
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/rubiks-selected-contact-gazebo-repeatability.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  selected-contact-repeats:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PR44_ARTIFACT_ID: '9094349012'
+      PR44_ARTIFACT_SHA256: 7e74927d81b8e7898bc62a0404cc461f10ca6b2c3925f67dd992bd8efdfb4af8
+      PR37_ARTIFACT_ID: '9090771854'
+      PR37_ARTIFACT_SHA256: 13b34c0984582b5ac7e882891726744163702e74073cdc9af56287fa91e53d2b
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXACT_HEAD_SHA }}
+
+      - name: Bind selected candidate and anchor evidence
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
+          mkdir -p artifacts/pr44 artifacts/pr37
+          curl --fail --location --retry 3 -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PR44_ARTIFACT_ID}/zip" -o artifacts/pr44.zip
+          printf '%s  %s\n' "${PR44_ARTIFACT_SHA256}" artifacts/pr44.zip | sha256sum --check --strict
+          unzip -q artifacts/pr44.zip -d artifacts/pr44
+          curl --fail --location --retry 3 -H "Authorization: Bearer ${GH_TOKEN}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PR37_ARTIFACT_ID}/zip" -o artifacts/pr37.zip
+          printf '%s  %s\n' "${PR37_ARTIFACT_SHA256}" artifacts/pr37.zip | sha256sum --check --strict
+          unzip -q artifacts/pr37.zip -d artifacts/pr37
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          s=json.loads(Path('artifacts/pr44/selected_dynamic_open_path_summary.json').read_text())
+          assert s['open_path_clear'] is True and s['states_checked']==2802
+          assert s['selected_translation_link7_m']==[0.0475,0.0,0.00825]
+          PY
+
+      - name: Generate three identical repeat inputs
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          selected=[0.0475,0.0,0.00825]
+          states=Path('artifacts/pr37/rubiks_pregrasp_open_gripper_states.tsv').read_text().splitlines()
+          assert len(states)==2802
+          anchor=states[1541].split('\t')
+          assert anchor[0]=='sample_001541' and len(anchor)==16
+          arm=[float(v) for v in anchor[8:14]]
+          assert abs(float(anchor[14])-0.019)<=1e-12 and abs(float(anchor[15])-0.019)<=1e-12
+          cube_fixture=[-0.019,0.0,0.1192]
+          support_fixture=[-0.019,0.0,0.0857]
+          cube=[cube_fixture[i]+selected[i] for i in range(3)]
+          support=[support_fixture[i]+selected[i] for i in range(3)]
+          assert all(abs(a-b)<=1e-12 for a,b in zip(cube,[0.0285,0.0,0.12745]))
+          assert all(abs(a-b)<=1e-12 for a,b in zip(support,[0.0285,0.0,0.09395]))
+          root=Path('artifacts/repeats'); root.mkdir(parents=True,exist_ok=True)
+          for index in range(1,4):
+              trial=root/f'repeat_{index}'; trial.mkdir(parents=True,exist_ok=True)
+              gate={
+                  'schema_version':1,
+                  'phase':'RUBIK-SELECTED-CONTACT-GAZEBO-REPEATABILITY',
+                  'repeat_index':index,
+                  'source_pr44_artifact_id':9094349012,
+                  'source_pr44_artifact_sha256':'7e74927d81b8e7898bc62a0404cc461f10ca6b2c3925f67dd992bd8efdfb4af8',
+                  'selected_translation_link7_m':selected,
+                  'arm_anchor_index':1541,
+                  'arm_target_rad':arm,
+                  'gripper_open_m':0.019,
+                  'cube_fixture_offset_link7_m':cube_fixture,
+                  'support_fixture_offset_link7_m':support_fixture,
+                  'cube_effective_offset_link7_m':cube,
+                  'support_effective_offset_link7_m':support,
+                  'cube_size_m':[0.057,0.057,0.057],
+                  'cube_mass_kg':0.09,
+                  'support_size_m':[0.075,0.040,0.010],
+                  'open_path_states_certified':2802,
+                  'contact_quality_contract':{'opposing_y_faces':True,'edge_margin_m':0.001,'normal_y_min':0.70,'min_quality_fraction':0.80,'max_contact_depth_m':0.001},
+                  'legacy_scalar_opening_gate_authorized':False,
+                  'lift_authorized':False,
+                  'attachment_authorized':False,
+              }
+              (trial/'rubiks_opposing_side_dynamic_gate_input.json').write_text(json.dumps(gate,indent=2,sort_keys=True)+'\n')
+          PY
+
+      - name: Build one minimal grasp-physics image
+        run: |
+          set -euo pipefail
+          python3 -m py_compile bin/run_rubiks_dynamic_opposing_side_hold.py bin/run_rubiks_dynamic_opposing_side_hold_v2.py bin/rubiks_contact_quality.py
+          python3 bin/rubiks_contact_quality.py --self-test
+          bash -n bin/run_gazebo_opposing_side_dynamic_supported_hold
+          docker build -f Dockerfile.rubiks-physics -t lime-rubiks-selected-repeat:${EXACT_HEAD_SHA} .
+
+      - name: Run three fresh Gazebo trials
+        run: |
+          set -euo pipefail
+          for index in 1 2 3; do
+            trial="$PWD/artifacts/repeats/repeat_${index}"
+            echo "=== repeat ${index} ==="
+            set +e
+            docker run --rm --network host -v "${trial}:/artifacts" \
+              lime-rubiks-selected-repeat:${EXACT_HEAD_SHA} \
+              bash -lc 'bash /root/bin/run_gazebo_opposing_side_dynamic_supported_hold /artifacts' \
+              >"${trial}/container.stdout.log" 2>"${trial}/container.stderr.log"
+            status=$?
+            set -e
+            printf '%s\n' "${status}" >"${trial}/process_status.txt"
+            test -s "${trial}/rubiks_opposing_side_dynamic_supported_hold_summary.json" || exit 2
+          done
+
+      - name: Aggregate repeatability evidence
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, statistics
+          from pathlib import Path
+          rows=[]
+          for index in range(1,4):
+              trial=Path(f'artifacts/repeats/repeat_{index}')
+              s=json.loads((trial/'rubiks_opposing_side_dynamic_supported_hold_summary.json').read_text())
+              status=int((trial/'process_status.txt').read_text().strip())
+              assert s.get('lift_command_sent') is False and s.get('ifra_attachment_used') is False and s.get('grasp_success_claimed') is False
+              q=s.get('contact_quality') or {}; h=s.get('hold_result') or {}; r=s.get('release_result') or {}
+              rows.append({
+                  'repeat_index':index,'process_status':status,'passed':s.get('passed') is True,'errors':s.get('errors') or [],
+                  'left_quality_fraction':(q.get('left') or {}).get('quality_fraction'),'right_quality_fraction':(q.get('right') or {}).get('quality_fraction'),
+                  'left_total_contact_points':(q.get('left') or {}).get('total_contact_points'),'right_total_contact_points':(q.get('right') or {}).get('total_contact_points'),
+                  'left_mean_local_position_m':(q.get('left') or {}).get('mean_local_position_m'),'right_mean_local_position_m':(q.get('right') or {}).get('mean_local_position_m'),
+                  'left_mean_abs_local_normal':(q.get('left') or {}).get('mean_abs_local_normal'),'right_mean_abs_local_normal':(q.get('right') or {}).get('mean_abs_local_normal'),
+                  'support_contact_ratio':h.get('support_contact_ratio'),'bilateral_finger_contact_ratio':h.get('bilateral_finger_contact_ratio'),
+                  'movement':h.get('movement'),'release_support_contact_ratio':r.get('support_contact_ratio')})
+          passed=[row for row in rows if row['passed']]
+          left=[float(row['left_quality_fraction']) for row in passed]; right=[float(row['right_quality_fraction']) for row in passed]
+          out={'schema_version':1,'phase':'RUBIK-SELECTED-CONTACT-GAZEBO-REPEATABILITY','selected_translation_link7_m':[0.0475,0.0,0.00825],
+               'open_path_clear':True,'open_path_states_checked':2802,'repeat_count':3,'passing_repeat_count':len(passed),'all_repeats_passed':len(passed)==3,
+               'minimum_left_quality_fraction':min(left) if left else None,'minimum_right_quality_fraction':min(right) if right else None,
+               'mean_left_quality_fraction':statistics.mean(left) if left else None,'mean_right_quality_fraction':statistics.mean(right) if right else None,
+               'repeats':rows,'decision':'SELECTED_CONTACT_REPEATABLE_AND_OPEN_PATH_CLEAR' if len(passed)==3 else 'BLOCKED_SELECTED_CONTACT_REPEATABILITY',
+               'acceptance_thresholds_unchanged':True,'lift_authorized':False,'attachment_authorized':False}
+          Path('artifacts/rubiks_selected_contact_repeatability_summary.json').write_text(json.dumps(out,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(out,indent=2,sort_keys=True))
+          PY
+
+      - name: Validate repeatability safety and completeness
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          s=json.loads(Path('artifacts/rubiks_selected_contact_repeatability_summary.json').read_text())
+          assert s['repeat_count']==3 and len(s['repeats'])==3
+          assert s['open_path_clear'] is True and s['open_path_states_checked']==2802
+          assert s['acceptance_thresholds_unchanged'] is True and s['lift_authorized'] is False and s['attachment_authorized'] is False
+          for row in s['repeats']:
+              assert row['process_status'] in (0,1)
+              if row['passed']:
+                  assert row['left_quality_fraction']>=0.80 and row['right_quality_fraction']>=0.80
+          print('repeatability decision:',s['decision'])
+          PY
+
+      - name: Upload repeatability evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-selected-contact-gazebo-repeatability-evidence
+          path: |
+            artifacts/rubiks_selected_contact_repeatability_summary.json
+            artifacts/repeats/
+          if-no-files-found: warn
+          retention-days: 30
