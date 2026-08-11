@@ -1,0 +1,159 @@
+name: Rubik supported preload evidence review
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/rubiks-supported-preload-evidence-review.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  review-preload-evidence:
+    runs-on: ubuntu-latest
+    env:
+      EXACT_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PRELOAD_ARTIFACT_ID: '9095560693'
+      PRELOAD_ARTIFACT_SHA256: ab11f042a2fdfdc7217a8e3560b20557461b8b2dd4361d210a19e8ec4a269feb
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.EXACT_HEAD_SHA }}
+
+      - name: Download completed preload matrix evidence
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${EXACT_HEAD_SHA}"
+          mkdir -p artifacts/raw
+          curl --fail --location --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${PRELOAD_ARTIFACT_ID}/zip" \
+            -o artifacts/preload.zip
+          printf '%s  %s\n' "${PRELOAD_ARTIFACT_SHA256}" artifacts/preload.zip | sha256sum --check --strict
+          unzip -q artifacts/preload.zip -d artifacts/raw
+          test -s artifacts/raw/rubiks_supported_preload_matrix_summary.json
+          for label in q_0p00725 q_0p00700 q_0p00675 q_0p00650; do
+            test -s "artifacts/raw/matrix/${label}/rubiks_supported_preload_summary.json"
+          done
+
+      - name: Apply global penetration hard limit
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          root=Path('artifacts/raw/matrix')
+          labels=['q_0p00725','q_0p00700','q_0p00675','q_0p00650']
+          rows=[]
+          for label in labels:
+              s=json.loads((root/label/'rubiks_supported_preload_summary.json').read_text())
+              q=s.get('contact_quality') or {}
+              left=q.get('left') or {}; right=q.get('right') or {}
+              left_depth=float(left.get('max_depth_m', 999))
+              right_depth=float(right.get('max_depth_m', 999))
+              fraction_pass=(
+                  s.get('passed') is True
+                  and float(left.get('quality_fraction',0)) >= 0.80
+                  and float(right.get('quality_fraction',0)) >= 0.80
+              )
+              global_depth_pass=left_depth <= 0.001 and right_depth <= 0.001
+              hard_pass=fraction_pass and global_depth_pass
+              force=s.get('contact_force') or {}
+              hold=s.get('hold_result') or {}
+              rows.append({
+                  'label':label,
+                  'target_m':float(s['requested_preload_target_m']),
+                  'bilateral_contact_target_m':float(s['bilateral_contact_target_m']),
+                  'preload_delta_from_bilateral_m':float(s['preload_delta_from_bilateral_m']),
+                  'raw_process_passed':s.get('passed') is True,
+                  'hard_passed':hard_pass,
+                  'global_depth_passed':global_depth_pass,
+                  'left_quality_fraction':float(left.get('quality_fraction',0)),
+                  'right_quality_fraction':float(right.get('quality_fraction',0)),
+                  'left_max_depth_m':left_depth,
+                  'right_max_depth_m':right_depth,
+                  'left_force':force.get('left'),
+                  'right_force':force.get('right'),
+                  'left_joint_position_m':hold.get('left_joint_position_m'),
+                  'physical_link_separation_m':hold.get('physical_link_separation_m'),
+                  'support_contact_ratio':hold.get('support_contact_ratio'),
+                  'bilateral_finger_contact_ratio':hold.get('bilateral_finger_contact_ratio'),
+                  'movement':hold.get('movement'),
+              })
+
+          passing=[row for row in rows if row['hard_passed']]
+          assert [round(row['target_m'],5) for row in passing] == [0.00725,0.007,0.00675], passing
+          selected=min(passing,key=lambda row:row['target_m'])
+          assert abs(selected['target_m']-0.00675) <= 1e-12
+          rejected=[row for row in rows if abs(row['target_m']-0.0065)<=1e-12][0]
+          assert rejected['raw_process_passed'] is True
+          assert rejected['global_depth_passed'] is False
+          assert rejected['left_max_depth_m'] > 0.001
+          assert rejected['right_max_depth_m'] > 0.001
+
+          baseline=[row for row in rows if abs(row['target_m']-0.00725)<=1e-12][0]
+          left_mean_gain=(float(selected['left_force']['mean_n'])/float(baseline['left_force']['mean_n'])-1.0)
+          right_mean_gain=(float(selected['right_force']['mean_n'])/float(baseline['right_force']['mean_n'])-1.0)
+          review={
+              'schema_version':1,
+              'phase':'RUBIK-SUPPORTED-GRIPPER-PRELOAD-EVIDENCE-REVIEW',
+              'source_artifact_id':9095560693,
+              'source_artifact_sha256':'ab11f042a2fdfdc7217a8e3560b20557461b8b2dd4361d210a19e8ec4a269feb',
+              'global_max_depth_limit_m':0.001,
+              'quality_fraction_minimum':0.80,
+              'trials':rows,
+              'hard_passing_trial_count':len(passing),
+              'selected_preload':selected,
+              'rejected_deeper_preload':rejected,
+              'mean_force_change_vs_q00725':{
+                  'left_fraction':left_mean_gain,
+                  'right_fraction':right_mean_gain,
+              },
+              'decision':'SELECT_Q_0P00675_FOR_UNSUPPORTED_RETENTION_RETRY',
+              'support_removed':False,
+              'lift_authorized':False,
+              'attachment_authorized':False,
+              'thresholds_relaxed':False,
+          }
+          Path('artifacts/rubiks_supported_preload_evidence_review.json').write_text(json.dumps(review,indent=2,sort_keys=True)+'\n')
+          print(json.dumps(review,indent=2,sort_keys=True))
+          PY
+
+      - name: Validate selected preload boundary
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          s=json.loads(Path('artifacts/rubiks_supported_preload_evidence_review.json').read_text())
+          assert s['decision']=='SELECT_Q_0P00675_FOR_UNSUPPORTED_RETENTION_RETRY'
+          assert s['hard_passing_trial_count']==3
+          q=s['selected_preload']
+          assert abs(float(q['target_m'])-0.00675)<=1e-12
+          assert q['hard_passed'] is True
+          assert float(q['left_quality_fraction'])>=0.80
+          assert float(q['right_quality_fraction'])>=0.80
+          assert float(q['left_max_depth_m'])<=0.001
+          assert float(q['right_max_depth_m'])<=0.001
+          rejected=s['rejected_deeper_preload']
+          assert abs(float(rejected['target_m'])-0.0065)<=1e-12
+          assert rejected['global_depth_passed'] is False
+          assert s['thresholds_relaxed'] is False
+          assert s['support_removed'] is False
+          assert s['lift_authorized'] is False
+          assert s['attachment_authorized'] is False
+          print('selected supported preload q=',q['target_m'])
+          PY
+
+      - name: Upload reviewed preload evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: rubiks-supported-preload-reviewed-evidence
+          path: artifacts/rubiks_supported_preload_evidence_review.json
+          retention-days: 30
