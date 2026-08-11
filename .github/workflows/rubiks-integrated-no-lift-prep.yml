@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'bin/run_rubiks_integrated_dynamic_no_lift.py'
+      - 'bin/run_gazebo_integrated_dynamic_no_lift'
       - '.github/workflows/rubiks-integrated-no-lift-prep.yml'
   workflow_dispatch:
 
@@ -20,10 +21,12 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m py_compile bin/run_rubiks_integrated_dynamic_no_lift.py
+          bash -n bin/run_gazebo_integrated_dynamic_no_lift
           python3 - <<'PY'
           from pathlib import Path
-          source=Path('bin/run_rubiks_integrated_dynamic_no_lift.py').read_text()
-          required=(
+          py=Path('bin/run_rubiks_integrated_dynamic_no_lift.py').read_text()
+          sh=Path('bin/run_gazebo_integrated_dynamic_no_lift').read_text()
+          required_py=(
               'integrated_open_return_zero',
               'integrated_open_approach_anchor',
               'fixture_present_during_open_arm_cycle',
@@ -35,17 +38,30 @@ jobs:
               'base_command_sent": False',
               'grasp_success_claimed": False',
           )
-          for token in required:
-              if token not in source:
+          for token in required_py:
+              if token not in py:
                   raise SystemExit(f'missing integrated gate token: {token}')
-          forbidden=(
+          required_sh=(
+              'run_rubiks_open_arm_pregrasp_setup.py',
+              'run_rubiks_integrated_dynamic_no_lift.py',
+              'libgazebo_ros2_control.so',
+              'arm_controller',
+              'gripper_controller',
+          )
+          for token in required_sh:
+              if token not in sh:
+                  raise SystemExit(f'missing integrated wrapper token: {token}')
+          forbidden_py=(
               'libgazebo_grasp_fix.so',
               'IFRA_LinkAttacher',
               '/cmd_vel',
               'Attach(',
               'attach_link',
           )
-          for token in forbidden:
-              if token in source:
+          for token in forbidden_py:
+              if token in py:
                   raise SystemExit(f'forbidden integrated gate token: {token}')
+          for token in ('IFRA_LinkAttacher', '/cmd_vel', 'attach_link'):
+              if token in sh:
+                  raise SystemExit(f'forbidden integrated wrapper token: {token}')
           PY
