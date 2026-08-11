@@ -3,6 +3,7 @@ name: Rubik PR28 hosted fallback
 on:
   pull_request:
     paths:
+      - 'Dockerfile.rubiks-collision'
       - '.github/workflows/rubiks-pr28-hosted-fallback.yml'
   workflow_dispatch:
 
@@ -54,11 +55,15 @@ jobs:
           test -s artifacts/pr27/pr26/pr23/accepted/pregrasp/rubiks_pregrasp_gripper_ground_states.tsv
           test -s artifacts/pr27/pr26/pr23/accepted/rubiks_pregrasp_fixture_contract.tsv
 
-      - name: Build Lime collision image on hosted runner
+      - name: Build minimal collision image
         run: |
           set -euo pipefail
           df -h
-          docker build -t lime-pr28-hosted:${EXACT_HEAD_SHA} .
+          docker build \
+            -f Dockerfile.rubiks-collision \
+            -t lime-pr28-collision:${EXACT_HEAD_SHA} .
+          docker image ls lime-pr28-collision:${EXACT_HEAD_SHA}
+          df -h
 
       - name: Run exact X compatibility scan
         run: |
@@ -66,29 +71,20 @@ jobs:
           docker run --rm \
             -e SOURCE_REF="${EXACT_HEAD_SHA}" \
             -v "$PWD/artifacts:/artifacts" \
-            lime-pr28-hosted:${EXACT_HEAD_SHA} \
+            lime-pr28-collision:${EXACT_HEAD_SHA} \
             bash -lc '
               set -euo pipefail
               source /opt/ros/humble/setup.bash
-              source /project/lib_ws/install/setup.bash
-              source /root/turtlebot3_ws/install/setup.bash
+              source /opt/rubiks_ws/install/setup.bash
 
-              python3 /root/bin/generate_rubiks_gripper_fixture_compatibility_candidates.py \
+              python3 /opt/rubiks/bin/generate_rubiks_gripper_fixture_compatibility_candidates.py \
                 --pr27-summary /artifacts/pr27/rubiks_corrected_fixture_gripper_sweep_summary.json \
                 --output /artifacts/rubiks_gripper_fixture_x_candidates.tsv
 
-              colcon build --merge-install \
-                --base-paths /project/rubiks_self_collision_ws/src \
-                --build-base /tmp/rubiks_fixture_compat_build \
-                --install-base /tmp/rubiks_fixture_compat_install \
-                --cmake-args -DCMAKE_BUILD_TYPE=Release \
-                --event-handlers console_direct+
-              source /tmp/rubiks_fixture_compat_install/setup.bash
-
-              python3 /root/bin/run_rubiks_gripper_fixture_x_compatibility_scan.py \
+              python3 /opt/rubiks/bin/run_rubiks_gripper_fixture_x_compatibility_scan.py \
                 --candidates /artifacts/rubiks_gripper_fixture_x_candidates.tsv \
                 --fixture /artifacts/pr27/pr26/pr23/accepted/rubiks_pregrasp_fixture_contract.tsv \
-                --sweep-executable /tmp/rubiks_fixture_compat_install/lib/rubiks_self_collision_preflight/rubiks_corrected_fixture_gripper_sweep_preflight \
+                --sweep-executable /opt/rubiks_ws/install/lib/rubiks_self_collision_preflight/rubiks_corrected_fixture_gripper_sweep_preflight \
                 --urdf /artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.urdf \
                 --srdf /artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.srdf \
                 --states /artifacts/pr27/pr26/pr23/accepted/pregrasp/rubiks_pregrasp_gripper_ground_states.tsv \
@@ -98,7 +94,7 @@ jobs:
 
               compatible_count="$(head -n1 /artifacts/rubiks_gripper_fixture_x_compatible_candidates.tsv | cut -f4)"
               if [[ "${compatible_count}" -gt 0 ]]; then
-                /tmp/rubiks_fixture_compat_install/lib/rubiks_self_collision_preflight/rubiks_relevance_candidate_batch_preflight \
+                /opt/rubiks_ws/install/lib/rubiks_self_collision_preflight/rubiks_relevance_candidate_batch_preflight \
                   /artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.urdf \
                   /artifacts/pr27/pr26/pr23/accepted/turtlebot3_lime_fixture_current.srdf \
                   /artifacts/pr27/pr26/pr23/accepted/pregrasp/rubiks_pregrasp_gripper_ground_states.tsv \
@@ -118,7 +114,7 @@ jobs:
               )
               [[ ! -s /artifacts/rubiks_gripper_fixture_x_full_path_results.tsv ]] || \
                 args+=(--full-path-results /artifacts/rubiks_gripper_fixture_x_full_path_results.tsv)
-              python3 /root/bin/summarize_rubiks_gripper_fixture_x_compatibility.py "${args[@]}"
+              python3 /opt/rubiks/bin/summarize_rubiks_gripper_fixture_x_compatibility.py "${args[@]}"
             '
 
       - name: Validate evidence
@@ -127,17 +123,16 @@ jobs:
           python3 - <<'PY'
           import json, os
           from pathlib import Path
-          p = Path('artifacts/rubiks_gripper_fixture_x_compatibility_summary.json')
-          s = json.loads(p.read_text())
-          assert s['source_ref'] == os.environ['EXACT_HEAD_SHA']
-          assert s['audit_passed'] is True and s['errors'] == []
-          assert s['x_scan']['candidate_count'] == 17
-          assert s['decision'] in {
+          summary = json.loads(Path('artifacts/rubiks_gripper_fixture_x_compatibility_summary.json').read_text())
+          assert summary['source_ref'] == os.environ['EXACT_HEAD_SHA']
+          assert summary['audit_passed'] is True and summary['errors'] == []
+          assert summary['x_scan']['candidate_count'] == 17
+          assert summary['decision'] in {
               'GRIPPER_FIXTURE_COMPATIBLE_FULL_PATH_CLEAR_TRANSLATION_FOUND',
               'NO_SWEEP_COMPATIBLE_TRANSLATION_IN_LOCAL_X_DOMAIN',
               'NO_SWEEP_COMPATIBLE_FULL_PATH_CLEAR_TRANSLATION_IN_LOCAL_X_DOMAIN',
           }
-          print(json.dumps(s, indent=2, sort_keys=True))
+          print(json.dumps(summary, indent=2, sort_keys=True))
           PY
 
       - name: Upload hosted fallback evidence
