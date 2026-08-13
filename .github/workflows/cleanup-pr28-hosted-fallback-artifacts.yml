@@ -1,0 +1,95 @@
+name: Cleanup obsolete PR28 hosted fallback artifacts
+
+on:
+  pull_request:
+    types: [synchronize]
+    paths:
+      - '.github/workflows/cleanup-pr28-hosted-fallback-artifacts.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  cleanup:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.number == 32 &&
+       github.event.pull_request.head.ref == 'agent/rubiks-pr28-hosted-fallback')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: nekomario28/lime_tidyup
+      PROTECTED_ID: '9090099685'
+      PROTECTED_SIZE: '459660'
+    steps:
+      - name: Verify protected latest artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          json="$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${REPO}/actions/artifacts/${PROTECTED_ID}")"
+          test "$(jq -r '.name' <<<"$json")" = 'rubiks-pr28-hosted-fallback-evidence'
+          test "$(jq -r '.size_in_bytes' <<<"$json")" = "${PROTECTED_SIZE}"
+          test "$(jq -r '.expired' <<<"$json")" = 'false'
+
+      - name: Verify obsolete artifacts exactly
+        shell: bash
+        run: |
+          set -euo pipefail
+          while read -r id expected_size; do
+            json="$(curl --fail --silent --show-error \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/repos/${REPO}/actions/artifacts/${id}")"
+            test "$(jq -r '.name' <<<"$json")" = 'rubiks-pr28-hosted-fallback-evidence'
+            test "$(jq -r '.size_in_bytes' <<<"$json")" = "$expected_size"
+            test "$(jq -r '.expired' <<<"$json")" = 'false'
+          done <<'EOF'
+          9089936056 810308366
+          9089857836 810279916
+          9089830964 809848724
+          9089823844 809848724
+          9089771683 809848724
+          EOF
+
+      - name: Delete only verified obsolete artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          for id in 9089936056 9089857836 9089830964 9089823844 9089771683; do
+            code="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+              --request DELETE \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/repos/${REPO}/actions/artifacts/${id}")"
+            test "$code" = '204'
+          done
+
+      - name: Verify deletion and protected artifact retention
+        shell: bash
+        run: |
+          set -euo pipefail
+          for id in 9089936056 9089857836 9089830964 9089823844 9089771683; do
+            code="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "https://api.github.com/repos/${REPO}/actions/artifacts/${id}")"
+            test "$code" = '404'
+          done
+          json="$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${REPO}/actions/artifacts/${PROTECTED_ID}")"
+          test "$(jq -r '.size_in_bytes' <<<"$json")" = "${PROTECTED_SIZE}"
+          printf 'deleted_bytes=%s\n' '4050134454'
+          printf 'protected_artifact_id=%s\n' "${PROTECTED_ID}"
