@@ -71,12 +71,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # We observed a stale image where dpkg reported diagnostic-updater installed but
 # libdiagnostic_updater.so was physically absent, causing deterministic exit 127.
 # Force the package payload back into place and fail the image build if Nav2 has
-# any unresolved shared-library dependency.
+# any unresolved shared-library dependency in a sourced Humble environment.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends --reinstall ros-humble-diagnostic-updater \
  && rm -rf /var/lib/apt/lists/* \
+ && source /opt/ros/humble/setup.bash \
  && test -s /opt/ros/humble/lib/libdiagnostic_updater.so \
- && ! ldd /opt/ros/humble/lib/nav2_lifecycle_manager/lifecycle_manager | grep -q 'not found'
+ && ldd /opt/ros/humble/lib/nav2_lifecycle_manager/lifecycle_manager > /tmp/nav2-lifecycle.ldd \
+ && if grep -q 'not found' /tmp/nav2-lifecycle.ldd; then cat /tmp/nav2-lifecycle.ldd; exit 1; fi
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
  ros-humble-dynamixel-sdk ros-humble-ros2-control ros-humble-ros2-controllers ros-humble-gripper-controllers \
@@ -101,7 +103,7 @@ RUN source /opt/ros/${ROS_DISTRO}/setup.bash \
 WORKDIR /root/turtlebot3_ws/install 
 COPY ./project/resource/turtlebot3_lime.urdf.xacro turtlebot3_lime_description/share/turtlebot3_lime_description/urdf
 # COPY ./project/resource/gazebo2.launch.py turtlebot3_lime_bringup/share/turtlebot3_lime_bringup/launch
-# COPY ./project/resource/moveit_gazebo2.launch.py turtlebot3_lime_moveit_config/share/turtlebot3_lime_moveit_config/launch
+# COPY ./project/resource/moveit_gazebo2.launch.py turtlebot3_lime_moveit_config/share/turtlebot3_lime_bringup/launch
 COPY ./project/resource/sim_house.world turtlebot3_lime_bringup/share/turtlebot3_lime_bringup/worlds
 
 WORKDIR /root/.gazebo
