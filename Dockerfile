@@ -67,12 +67,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  ros-humble-gazebo-* ros-humble-navigation2 \
  ros-humble-nav2-bringup
 
+# Nav2's lifecycle_manager is dynamically linked against diagnostic_updater.
+# We observed a stale image where dpkg reported diagnostic-updater installed but
+# libdiagnostic_updater.so was physically absent, causing deterministic exit 127.
+# Force the package payload back into place and fail the image build if Nav2 has
+# any unresolved shared-library dependency.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends --reinstall ros-humble-diagnostic-updater \
+ && rm -rf /var/lib/apt/lists/* \
+ && test -s /opt/ros/humble/lib/libdiagnostic_updater.so \
+ && ! ldd /opt/ros/humble/lib/nav2_lifecycle_manager/lifecycle_manager | grep -q 'not found'
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
  ros-humble-dynamixel-sdk ros-humble-ros2-control ros-humble-ros2-controllers ros-humble-gripper-controllers \
  ros-humble-moveit ros-humble-moveit-servo ros-humble-cartographer \ 
  ros-humble-realsense2-description \
  ros-humble-cartographer-ros ros-humble-gripper-controllers \
  ros-humble-tf-transformations
+
+# Keep the D435 visual resource deterministic.  The Humble description must use
+# package:// and the referenced Collada asset must actually exist in the image.
+RUN grep -Fq 'package://realsense2_description/meshes/d435.dae' \
+      /opt/ros/humble/share/realsense2_description/urdf/_d435.urdf.xacro \
+ && test -s /opt/ros/humble/share/realsense2_description/meshes/d435.dae
 
 RUN mkdir -p /root/turtlebot3_ws/src
 WORKDIR /root/turtlebot3_ws 
