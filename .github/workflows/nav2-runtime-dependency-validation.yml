@@ -1,0 +1,61 @@
+name: Nav2 runtime dependency validation
+
+on:
+  push:
+    branches: [fix/nav2-runtime-dependency]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lime-nav2-runtime-dependency-validation
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: self-hosted
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+
+      - name: Verify patch scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -Fq -- '--reinstall ros-humble-diagnostic-updater' Dockerfile
+          grep -Fq 'source /opt/ros/humble/setup.bash' Dockerfile
+          grep -Fq 'ldd /opt/ros/humble/lib/nav2_lifecycle_manager/lifecycle_manager' Dockerfile
+          if grep -Fq "grep -Fq 'package://realsense2_description/meshes/d435.dae'" Dockerfile; then
+            echo 'unexpected D435 scope remains in this branch' >&2
+            exit 1
+          fi
+
+      - name: Reproduce and repair missing diagnostic_updater payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker info >/dev/null
+          docker run --rm osrf/ros:humble-desktop-full bash -lc '
+            set -euo pipefail
+            apt-get update >/dev/null
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ros-humble-nav2-bringup >/dev/null
+            source /opt/ros/humble/setup.bash
+            lib=/opt/ros/humble/lib/libdiagnostic_updater.so
+            exe=/opt/ros/humble/lib/nav2_lifecycle_manager/lifecycle_manager
+            test -s "$lib"
+            test -x "$exe"
+            dpkg-query -W -f="${Status}\n" ros-humble-diagnostic-updater | grep -Fq "install ok installed"
+            rm -f "$lib"
+            dpkg-query -W -f="${Status}\n" ros-humble-diagnostic-updater | grep -Fq "install ok installed"
+            ldd "$exe" > /tmp/broken.ldd
+            grep -Fq "libdiagnostic_updater.so => not found" /tmp/broken.ldd
+            apt-get install -y --no-install-recommends --reinstall ros-humble-diagnostic-updater >/dev/null
+            source /opt/ros/humble/setup.bash
+            test -s "$lib"
+            ldd "$exe" > /tmp/repaired.ldd
+            if grep -q "not found" /tmp/repaired.ldd; then
+              cat /tmp/repaired.ldd >&2
+              exit 1
+            fi
+            echo NAV2_DIAGNOSTIC_UPDATER_REPAIR=PASS
+          '
