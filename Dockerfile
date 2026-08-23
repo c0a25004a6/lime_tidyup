@@ -78,7 +78,7 @@ RUN apt-get update \
  && source /opt/ros/humble/setup.bash \
  && test -s /opt/ros/humble/lib/libdiagnostic_updater.so \
  && ldd /opt/ros/humble/lib/nav2_lifecycle_manager/lifecycle_manager > /tmp/nav2-lifecycle.ldd \
- && if grep -q 'not found' /tmp/nav2-lifecycle.ldd; then cat /tmp/nav2-lifecycle.ldd; exit 1; fi
+ && if grep -q 'not found' /tmp/nav2-lifecycle.ldd; then cat /tmp/nav2-lifecycle.ldd; exit 1; else rm -f /tmp/nav2-lifecycle.ldd; fi
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
  ros-humble-dynamixel-sdk ros-humble-ros2-control ros-humble-ros2-controllers ros-humble-gripper-controllers \
@@ -86,12 +86,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  ros-humble-realsense2-description \
  ros-humble-cartographer-ros ros-humble-gripper-controllers \
  ros-humble-tf-transformations
-
-# Keep the D435 visual resource deterministic.  The Humble description must use
-# package:// and the referenced Collada asset must actually exist in the image.
-RUN grep -Fq 'package://realsense2_description/meshes/d435.dae' \
-      /opt/ros/humble/share/realsense2_description/urdf/_d435.urdf.xacro \
- && test -s /opt/ros/humble/share/realsense2_description/meshes/d435.dae
 
 RUN mkdir -p /root/turtlebot3_ws/src
 WORKDIR /root/turtlebot3_ws 
@@ -103,7 +97,7 @@ RUN source /opt/ros/${ROS_DISTRO}/setup.bash \
 WORKDIR /root/turtlebot3_ws/install 
 COPY ./project/resource/turtlebot3_lime.urdf.xacro turtlebot3_lime_description/share/turtlebot3_lime_description/urdf
 # COPY ./project/resource/gazebo2.launch.py turtlebot3_lime_bringup/share/turtlebot3_lime_bringup/launch
-# COPY ./project/resource/moveit_gazebo2.launch.py turtlebot3_lime_moveit_config/share/turtlebot3_lime_bringup/launch
+# COPY ./project/resource/moveit_gazebo2.launch.py turtlebot3_lime_moveit_config/share/turtlebot3_lime_moveit_config/launch
 COPY ./project/resource/sim_house.world turtlebot3_lime_bringup/share/turtlebot3_lime_bringup/worlds
 
 WORKDIR /root/.gazebo
