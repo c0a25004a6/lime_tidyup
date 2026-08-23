@@ -1,0 +1,32 @@
+name: One-shot closed ref cleanup
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    if: github.repository == 'nekomario28/lime_tidyup' && github.head_ref == 'maintenance/cleanup-closed-refs-2026-08-23'
+    permissions:
+      contents: write
+      pull-requests: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout cleanup head
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Delete only predeclared closed refs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/cleanup_closed_refs_once.py
