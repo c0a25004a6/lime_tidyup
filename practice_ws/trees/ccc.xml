@@ -2,10 +2,9 @@
     <BehaviorTree ID="cube_grab">
         <Sequence name="main">
             
-            <!-- 0. 音声コマンド -->
+            <!-- 0. 位置指定 -->
 
-            <VoiceCommand name="listen" />
-            <VoiceSpeak name="confirm" text="わかりました" />
+            <SetDestinationByName name="set_init" destination="C"/>
 
             <!-- 1. キューブを探す -->
             <SearchCube
