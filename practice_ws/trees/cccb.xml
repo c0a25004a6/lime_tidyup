@@ -2,10 +2,10 @@
     <BehaviorTree ID="cube_grab">
         <Sequence name="main">
             
-            <!-- 0. 音声コマンド -->
+            <!-- 0. 位置指定 -->
 
-            <VoiceCommand name="listen" />
-            <VoiceSpeak name="confirm" text="わかりました" />
+            <SetDestinationByName name="set_init" destination="C"/>
+            <GoToPose name="go" />
 
             <!-- 1. キューブを探す -->
             <SearchCube
@@ -19,6 +19,9 @@
                 turn_speed="[0.30]"
                 center_tolerance="[20.0]"/>
 
+            <Mini_Walk name="walk_backward"
+                target="[-400]"/>
+
             <!-- 3. Depthで距離を測り、キューブの手前まで進む -->
             <GoFrontCube
                 name="go_front_cube"
@@ -28,11 +31,11 @@
                 turn_speed="[0.30]"
                 target_offset_px="[40]"/>
             <!-- 4. 接近後、もう一度キューブを中央に合わせる -->
-            <TakeAim
+            <!-- <TakeAim
                 name="take_aim_after_approach"
                 threshold="[0.30]"
                 turn_speed="[0.30]"
-                center_tolerance="[20.0]"/>
+                center_tolerance="[20.0]"/> -->
   
             <!-- 5. アームを物をつかむ姿勢にする -->
             <Open name="hirou"/>  
@@ -41,13 +44,13 @@
             <!-- 6. その姿勢のまま40cm前進する -->
             <Walk
                 name="walk_forward_40cm"
-                distance="[0.40]"/>
+                distance="[0.15]"/>
 
             <!-- 7. 少しだけ左へ旋回する -->
-            <TurnLeft
+            <!-- <TurnLeft
                 name="turn_left_before_grab"
                 turn_seconds="[0.50]"
-                turn_speed="[0.20]"/>
+                turn_speed="[0.20]"/> -->
 
             <!-- 8. グリッパーを閉じてキューブをつかむ -->
             <Close name="grab_cube"/>
@@ -62,7 +65,11 @@
 
             <!-- 11. つかんだキューブを置く場所まで移動する -->
             
-            <GoToPose name="go" />
+            <SetDestinationByName name="set_init" destination="INIT"/>
+            <GoToPose name="move_to_place_loc"/>
+            <Walk
+                name="walk_forward_20cm"
+                distance="[0.20]"/>
 
             <!-- 12. 物を置く -->
 
@@ -73,9 +80,6 @@
 
             <ArmHome name="arm_home"/> 
             <Close name="grab_cube"/>
-
-            <!-- 14. 初期位置へ戻る -->
-
             <SetDestinationByName name="set_init" destination="INIT"/>
             <GoToPose name="move_to_place_loc"/>
             
