@@ -13,10 +13,15 @@ permissions:
 
 jobs:
   render:
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
 
       - name: Verify pinned dev2 sample inputs
         shell: bash
@@ -28,36 +33,36 @@ jobs:
           file yolo_ws/sample.png || true
           sha256sum yolo_ws/sample.png yolo_ws/runs/pose/train-2/weights/best.pt
 
-      - name: Ensure YOLO runtime image
+      - name: Install visualization runtime
         shell: bash
         run: |
           set -euo pipefail
-          if ! docker image inspect yolo_ros2-image_yuu >/dev/null 2>&1; then
-            docker build -f Dockerfile.yolo -t yolo_ros2-image_yuu .
-          fi
+          python -m pip install --upgrade pip
+          python -m pip install ultralytics pillow
+          python - <<'PY'
+          import torch, ultralytics, PIL
+          print('torch', torch.__version__)
+          print('ultralytics', ultralytics.__version__)
+          print('Pillow', PIL.__version__)
+          PY
 
       - name: Render actual sample prediction overlay
         shell: bash
         run: |
           set -euo pipefail
           rm -f yolo_ws/sample_prediction_debug.jpg yolo_ws/sample_prediction_debug.json
-          docker run --rm --network host \
-            --user "$(id -u):$(id -g)" \
-            -e HOME=/tmp \
-            -e YOLO_CONFIG_DIR=/tmp/Ultralytics \
-            -v "$GITHUB_WORKSPACE/yolo_ws:/root/yolo_ws:rw" \
-            yolo_ros2-image_yuu \
-            bash -lc 'cd /root/yolo_ws && python3 visualize_sample_cube_debug.py \
-              --image sample.png \
-              --model runs/pose/train-2/weights/best.pt \
-              --out-image sample_prediction_debug.jpg \
-              --out-json sample_prediction_debug.json \
-              --conf 0.25'
-          test -s yolo_ws/sample_prediction_debug.jpg
-          test -s yolo_ws/sample_prediction_debug.json
-          cat yolo_ws/sample_prediction_debug.json
-          file yolo_ws/sample_prediction_debug.jpg || true
-          ls -lh yolo_ws/sample_prediction_debug.jpg yolo_ws/sample_prediction_debug.json
+          cd yolo_ws
+          python visualize_sample_cube_debug.py \
+            --image sample.png \
+            --model runs/pose/train-2/weights/best.pt \
+            --out-image sample_prediction_debug.jpg \
+            --out-json sample_prediction_debug.json \
+            --conf 0.25
+          test -s sample_prediction_debug.jpg
+          test -s sample_prediction_debug.json
+          cat sample_prediction_debug.json
+          file sample_prediction_debug.jpg || true
+          ls -lh sample_prediction_debug.jpg sample_prediction_debug.json
 
       - name: Upload visualization evidence
         uses: actions/upload-artifact@v4
