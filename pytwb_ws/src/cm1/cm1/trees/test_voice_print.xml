@@ -1,7 +1,0 @@
-<root>
-    <BehaviorTree ID="test_voice_print">
-        <Sequence name="main">
-            <PrintVoiceText name="listen_and_print" />
-        </Sequence>
-    </BehaviorTree>
-</root>

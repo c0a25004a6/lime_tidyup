@@ -1,9 +1,0 @@
-<root>
-    <BehaviorTree ID="bt_voice">
-        <Sequence name="main">
-            <VoiceCommand name="listen" />
-            <VoiceSpeak name="confirm" text="わかりました" />
-            <GoToPose name="go" />
-        </Sequence>
-    </BehaviorTree>
-</root>
