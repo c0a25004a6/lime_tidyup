@@ -141,11 +141,11 @@ jobs:
           fi
           test "$(wc -l </tmp/mapping.tsv)" -eq "$((1 + $(git rev-list --count "$OLD_ROOT..$OLD_DEV2")))"
 
-          python3 - /tmp/mapping.tsv <<'PY'
+          python3 - /tmp/mapping.tsv "$OLD_ROOT" "$BASELINE" <<'PY'
           import subprocess
           import sys
 
-          mapping_path = sys.argv[1]
+          mapping_path, old_root, baseline = sys.argv[1:]
 
           def raw(commit):
               return subprocess.check_output(['git','cat-file','commit',commit])
@@ -154,29 +154,38 @@ jobs:
               header, message = raw(commit).split(b'\n\n', 1)
               lines = header.splitlines()
               tree = next(x.split(b' ', 1)[1] for x in lines if x.startswith(b'tree '))
-              parents = [x.split(b' ', 1)[1] for x in lines if x.startswith(b'parent ')]
+              parents = [x.split(b' ', 1)[1].decode() for x in lines if x.startswith(b'parent ')]
               author = next(x for x in lines if x.startswith(b'author '))
               committer = next(x for x in lines if x.startswith(b'committer '))
               return tree, parents, author, committer, message
 
-          count = 0
+          rows = []
           with open(mapping_path, encoding='utf-8') as f:
               for line in f:
-                  old, new = line.rstrip('\n').split('\t')
-                  otree, oparents, oauthor, ocommitter, omsg = parse(old)
-                  ntree, nparents, nauthor, ncommitter, nmsg = parse(new)
-                  if otree != ntree:
-                      raise SystemExit(f'tree mismatch: {old} -> {new}')
-                  if oauthor != nauthor:
-                      raise SystemExit(f'author header mismatch: {old} -> {new}')
-                  if ocommitter != ncommitter:
-                      raise SystemExit(f'committer header mismatch: {old} -> {new}')
-                  if omsg != nmsg:
-                      raise SystemExit(f'message mismatch: {old} -> {new}')
-                  if len(oparents) != len(nparents):
-                      raise SystemExit(f'parent-count mismatch: {old} -> {new}')
-                  count += 1
-          print(f'exact_metadata_gate_count={count}')
+                  rows.append(tuple(line.rstrip('\n').split('\t')))
+          mapping = dict(rows)
+
+          for old, new in rows:
+              otree, oparents, oauthor, ocommitter, omsg = parse(old)
+              ntree, nparents, nauthor, ncommitter, nmsg = parse(new)
+              if otree != ntree:
+                  raise SystemExit(f'tree mismatch: {old} -> {new}')
+              if oauthor != nauthor:
+                  raise SystemExit(f'author header mismatch: {old} -> {new}')
+              if ocommitter != ncommitter:
+                  raise SystemExit(f'committer header mismatch: {old} -> {new}')
+              if omsg != nmsg:
+                  raise SystemExit(f'message mismatch: {old} -> {new}')
+              if old == old_root:
+                  if oparents:
+                      raise SystemExit('old root unexpectedly has parents')
+                  if nparents != [baseline]:
+                      raise SystemExit(f'new root parent is not canonical baseline: {nparents}')
+              else:
+                  expected = [mapping[p] for p in oparents]
+                  if nparents != expected:
+                      raise SystemExit(f'parent remap mismatch: {old} -> {new}: {nparents} != {expected}')
+          print(f'exact_metadata_and_parent_gate_count={len(rows)}')
           PY
 
           echo
