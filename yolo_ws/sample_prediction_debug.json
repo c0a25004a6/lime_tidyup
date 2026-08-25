@@ -1,0 +1,95 @@
+{
+  "schema_version": "lime-dev2-sample-yolo-pose-v1",
+  "source": {
+    "image": "sample.png",
+    "image_sha256": "48eb4331e729900ac82c630e582ca54deff6080d5ad13b11628290495e451841",
+    "model": "best.pt",
+    "model_sha256": "9a888f153380a0cf9ed51fdfb311ec48f5402bb13ad7009fa9b8ee2d9f182ea9"
+  },
+  "runtime": {
+    "confidence_threshold": 0.25,
+    "device": "cpu",
+    "camera_info_used": false,
+    "pnp_pose_estimation_performed": false
+  },
+  "detections": [
+    {
+      "index": 0,
+      "class_id": 2,
+      "class_name": "3-face-cube",
+      "confidence": 0.9590945243835449,
+      "box_xyxy": [
+        396.77117919921875,
+        137.01947021484375,
+        914.8598022460938,
+        616.1307373046875
+      ],
+      "keypoints": [
+        {
+          "index": 0,
+          "vertex": "x-_y-_z-",
+          "xy": [
+            382.34295654296875,
+            273.9044189453125
+          ],
+          "confidence": 0.5393384695053101
+        },
+        {
+          "index": 1,
+          "vertex": "x+_y-_z-",
+          "xy": [
+            588.0755615234375,
+            355.10394287109375
+          ],
+          "confidence": 0.8100650310516357
+        },
+        {
+          "index": 2,
+          "vertex": "x+_y+_z-",
+          "xy": [
+            577.47119140625,
+            570.1298828125
+          ],
+          "confidence": 0.8484933972358704
+        },
+        {
+          "index": 3,
+          "vertex": "x-_y+_z-",
+          "xy": [
+            582.94189453125,
+            580.9868774414062
+          ],
+          "confidence": 0.7037501335144043
+        },
+        {
+          "index": 4,
+          "vertex": "x-_y-_z+",
+          "xy": [
+            606.9449462890625,
+            154.54925537109375
+          ],
+          "confidence": 0.6049754023551941
+        },
+        {
+          "index": 5,
+          "vertex": "x+_y-_z+",
+          "xy": [
+            421.5107421875,
+            182.83950805664062
+          ],
+          "confidence": 0.27381324768066406
+        },
+        {
+          "index": 6,
+          "vertex": "x+_y+_z+",
+          "xy": [
+            438.5347900390625,
+            497.5299072265625
+          ],
+          "confidence": 0.4403354525566101
+        }
+      ]
+    }
+  ],
+  "note": "Visualization is 2D YOLO Pose inference only. No CameraInfo was supplied, so no 3D pose axes or PnP claim is drawn."
+}
