@@ -1,0 +1,38 @@
+name: cube8-runtime-model-export-ci
+
+on:
+  push:
+    branches:
+      - work/dev2-cube8-runtime-20260826
+    paths:
+      - .github/workflows/cube8-runtime-model-export-ci.yml
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 3
+    env:
+      EXPECTED_ONNX_SHA256: 3c04a6939c736a1730b2b0c93c66a10cf60b29e48fc545b1a0c7515aa23dacac
+    steps:
+      - name: Verify and stage retained Cube8 ONNX only
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_onnx="$HOME/Videos/lime/cube8-rtmpose/32595602886-3-recovery-32773097860/model.onnx"
+          test -s "$source_onnx"
+          actual="$(sha256sum "$source_onnx" | awk '{print $1}')"
+          test "$actual" = "$EXPECTED_ONNX_SHA256"
+          mkdir -p "$RUNNER_TEMP/cube8-runtime-model"
+          cp "$source_onnx" "$RUNNER_TEMP/cube8-runtime-model/cube8-rtmpose-retained.onnx"
+          printf '%s\n' "$actual" > "$RUNNER_TEMP/cube8-runtime-model/sha256.txt"
+          ls -lh "$RUNNER_TEMP/cube8-runtime-model/cube8-rtmpose-retained.onnx"
+      - name: Upload exact retained model
+        uses: actions/upload-artifact@v4
+        with:
+          name: cube8-retained-onnx-exact
+          path: ${{ runner.temp }}/cube8-runtime-model/
+          if-no-files-found: error
+          retention-days: 7
