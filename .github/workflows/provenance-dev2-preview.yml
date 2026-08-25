@@ -1,0 +1,188 @@
+name: Provenance dev2 rewrite preview
+
+on:
+  push:
+    branches:
+      - audit/provenance-dev2-rewrite
+
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 30
+    steps:
+      - name: Checkout audit branch with full history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Build and verify dev2 provenance rewrite preview
+        shell: bash
+        env:
+          OLD_DEV2: 66c20a90a2f0a1652716f53df886ac9603fbebb1
+          OLD_ROOT: 5252d3a1fd2c5d987a414772f2caf010964b4380
+          FLAT_COPY: 161ea8a30baa559cce2f48a415427996eec0ff37
+        run: |
+          set -Eeuo pipefail
+
+          git remote remove canonical 2>/dev/null || true
+          git remote add canonical https://github.com/momoiorg-repository/LimeSimulDemo.git
+          git fetch --no-tags canonical main
+          git fetch origin dev2
+
+          test "$(git rev-parse origin/dev2)" = "$OLD_DEV2"
+          test "$(git rev-list --max-parents=0 "$OLD_DEV2")" = "$OLD_ROOT"
+          git merge-base --is-ancestor "$OLD_ROOT" "$FLAT_COPY"
+          git merge-base --is-ancestor "$FLAT_COPY" "$OLD_DEV2"
+
+          echo '=== old ancestry facts ==='
+          echo "old_dev2=$OLD_DEV2"
+          echo "old_root=$OLD_ROOT"
+          echo "flat_copy=$FLAT_COPY"
+          echo "post_root_commits=$(git rev-list --count "$OLD_ROOT..$OLD_DEV2")"
+          echo "merge_commits=$(git rev-list --count --merges "$OLD_ROOT..$OLD_DEV2")"
+          echo
+
+          python3 - <<'PY'
+          import subprocess
+
+          ROOT = '5252d3a1fd2c5d987a414772f2caf010964b4380'
+
+          def tree(commit):
+              out = subprocess.check_output(['git','ls-tree','-r',commit], text=True)
+              d = {}
+              for line in out.splitlines():
+                  meta, path = line.split('\t', 1)
+                  mode, typ, sha = meta.split()
+                  if typ == 'blob':
+                      d[path] = sha
+              return d
+
+          root = tree(ROOT)
+          commits = subprocess.check_output(['git','rev-list','canonical/main'], text=True).split()
+          scored = []
+          for c in commits:
+              t = tree(c)
+              common_paths = root.keys() & t.keys()
+              exact = sum(root[p] == t[p] for p in common_paths)
+              scored.append((exact, len(common_paths), -abs(len(root)-len(t)), c, len(t)))
+          scored.sort(reverse=True)
+          print('=== upstream baseline candidates by exact path+blob identity ===')
+          for exact, common, size_delta, c, n in scored[:10]:
+              print(f'{c}\texact={exact}\tcommon_paths={common}\troot_files={len(root)}\tupstream_files={n}')
+          best = scored[0][3]
+          with open('/tmp/baseline','w') as f:
+              f.write(best)
+          PY
+
+          BASELINE="$(cat /tmp/baseline)"
+          echo
+          echo "selected_baseline=$BASELINE"
+          git show -s --format='baseline_author=%an <%ae>%nbaseline_date=%aI%nbaseline_subject=%s%nbaseline_tree=%T' "$BASELINE"
+          echo
+
+          echo '=== bootstrap delta from canonical baseline ==='
+          git diff --stat "$BASELINE" "$OLD_ROOT"
+          echo
+          git diff --name-status "$BASELINE" "$OLD_ROOT"
+          echo
+
+          echo '=== flattened-copy commit delta ==='
+          git show --stat --oneline "$FLAT_COPY"
+          echo
+
+          echo '=== old author inventory (root..dev2, including root) ==='
+          git log --reverse --format='%H%x09%an%x09%ae%x09%aI%x09%s' "$OLD_ROOT^!" "$OLD_ROOT..$OLD_DEV2"
+          echo
+
+          root_author_name="$(git show -s --format=%an "$OLD_ROOT")"
+          root_author_email="$(git show -s --format=%ae "$OLD_ROOT")"
+          root_author_date="$(git show -s --format=%aI "$OLD_ROOT")"
+          root_committer_name="$(git show -s --format=%cn "$OLD_ROOT")"
+          root_committer_email="$(git show -s --format=%ce "$OLD_ROOT")"
+          root_committer_date="$(git show -s --format=%cI "$OLD_ROOT")"
+          root_tree="$(git show -s --format=%T "$OLD_ROOT")"
+          git show -s --format=%B "$OLD_ROOT" >/tmp/root-message
+
+          export GIT_AUTHOR_NAME="$root_author_name"
+          export GIT_AUTHOR_EMAIL="$root_author_email"
+          export GIT_AUTHOR_DATE="$root_author_date"
+          export GIT_COMMITTER_NAME="$root_committer_name"
+          export GIT_COMMITTER_EMAIL="$root_committer_email"
+          export GIT_COMMITTER_DATE="$root_committer_date"
+          NEW_ROOT="$(git commit-tree "$root_tree" -p "$BASELINE" </tmp/root-message)"
+          unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
+
+          git branch -f provenance-preview "$OLD_DEV2"
+          git switch provenance-preview
+          git rebase --rebase-merges --onto "$NEW_ROOT" "$OLD_ROOT"
+          NEW_HEAD="$(git rev-parse HEAD)"
+
+          echo '=== candidate ==='
+          echo "new_root=$NEW_ROOT"
+          echo "new_head=$NEW_HEAD"
+          echo "old_tree=$(git show -s --format=%T "$OLD_DEV2")"
+          echo "new_tree=$(git show -s --format=%T "$NEW_HEAD")"
+
+          test "$(git show -s --format=%T "$OLD_DEV2")" = "$(git show -s --format=%T "$NEW_HEAD")"
+          git diff --exit-code "$OLD_DEV2" "$NEW_HEAD"
+          git merge-base --is-ancestor "$BASELINE" "$NEW_HEAD"
+          if git merge-base --is-ancestor "$OLD_ROOT" "$NEW_HEAD"; then
+            echo 'old standalone root unexpectedly remains an ancestor' >&2
+            exit 1
+          fi
+
+          python3 - "$OLD_ROOT" "$OLD_DEV2" "$NEW_ROOT" "$NEW_HEAD" <<'PY'
+          import subprocess, sys
+          old_root, old_head, new_root, new_head = sys.argv[1:]
+
+          def commits(rng):
+              return subprocess.check_output(['git','rev-list','--reverse',rng], text=True).split()
+
+          old = [old_root] + commits(f'{old_root}..{old_head}')
+          new = [new_root] + commits(f'{new_root}..{new_head}')
+
+          def key(c):
+              fmt = '%T%x00%an%x00%ae%x00%aI%x00%B'
+              return subprocess.check_output(['git','show','-s',f'--format={fmt}',c], text=True)
+
+          buckets = {}
+          for c in new:
+              buckets.setdefault(key(c), []).append(c)
+
+          missing = []
+          ambiguous = []
+          rows = []
+          for c in old:
+              hits = buckets.get(key(c), [])
+              if not hits:
+                  missing.append(c)
+              elif len(hits) != 1:
+                  ambiguous.append((c, hits))
+              else:
+                  rows.append((c, hits[0]))
+
+          print('=== old -> new mapping ===')
+          for a,b in rows:
+              print(f'{a}\t{b}')
+          print(f'mapping_count={len(rows)} old_count={len(old)} new_count={len(new)}')
+          print(f'missing={len(missing)} ambiguous={len(ambiguous)}')
+          if missing or ambiguous or len(old) != len(new):
+              raise SystemExit(1)
+          PY
+
+          echo
+          echo '=== blame author samples on candidate ==='
+          for path in README.md pytwb_ws/src/cm1/cm1/behavior/setlocations.py pytwb_ws/src/cm1/cm1/lib/actor/cognitive.py; do
+            if git cat-file -e "$NEW_HEAD:$path" 2>/dev/null; then
+              echo "--- $path"
+              git blame -w -M -C -C --line-porcelain "$NEW_HEAD" -- "$path" \
+                | awk '/^author /{sub(/^author /,""); count[$0]++} END{for (a in count) print count[a], a}' \
+                | sort -nr
+            fi
+          done
+
+          echo
+          echo 'PREVIEW_GREEN'
