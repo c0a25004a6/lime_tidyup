@@ -16,8 +16,27 @@ jobs:
   static:
     runs-on: ubuntu-latest
     timeout-minutes: 8
+    env:
+      EXPECTED_SAMPLE_SHA256: 48eb4331e729900ac82c630e582ca54deff6080d5ad13b11628290495e451841
     steps:
       - uses: actions/checkout@v4
+      - name: Verify exact dev2 sample
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s yolo_ws/sample.png
+          actual="$(sha256sum yolo_ws/sample.png | awk '{print $1}')"
+          test "$actual" = "$EXPECTED_SAMPLE_SHA256"
+          mkdir -p artifacts/dev2-sample
+          cp yolo_ws/sample.png artifacts/dev2-sample/sample.png
+          printf '%s\n' "$actual" > artifacts/dev2-sample/sha256.txt
+      - name: Upload exact dev2 sample
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev2-sample-png-exact
+          path: artifacts/dev2-sample/
+          if-no-files-found: error
+          retention-days: 7
       - name: Compile migrated pure runtime
         run: |
           set -euo pipefail
