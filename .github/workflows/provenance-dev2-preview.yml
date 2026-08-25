@@ -24,8 +24,12 @@ jobs:
           OLD_DEV2: 66c20a90a2f0a1652716f53df886ac9603fbebb1
           OLD_ROOT: 5252d3a1fd2c5d987a414772f2caf010964b4380
           FLAT_COPY: 161ea8a30baa559cce2f48a415427996eec0ff37
+          BASELINE: 737274733d018596cef24e5d9f9c7c6e4834159d
         run: |
           set -Eeuo pipefail
+
+          git config user.name 'Provenance Replay'
+          git config user.email '206304251+nekomario28@users.noreply.github.com'
 
           git remote remove canonical 2>/dev/null || true
           git remote add canonical https://github.com/momoiorg-repository/LimeSimulDemo.git
@@ -36,65 +40,38 @@ jobs:
           test "$(git rev-list --max-parents=0 "$OLD_DEV2")" = "$OLD_ROOT"
           git merge-base --is-ancestor "$OLD_ROOT" "$FLAT_COPY"
           git merge-base --is-ancestor "$FLAT_COPY" "$OLD_DEV2"
+          git merge-base --is-ancestor "$BASELINE" canonical/main
 
-          echo '=== old ancestry facts ==='
+          # Strong source-boundary evidence: the standalone root carries the exact
+          # README blob from canonical 737274..., which predates it by three days.
+          test "$(git rev-parse "$OLD_ROOT:README.md")" = "$(git rev-parse "$BASELINE:README.md")"
+          root_epoch="$(git show -s --format=%at "$OLD_ROOT")"
+          baseline_epoch="$(git show -s --format=%at "$BASELINE")"
+          test "$baseline_epoch" -lt "$root_epoch"
+
+          echo '=== source boundary ==='
           echo "old_dev2=$OLD_DEV2"
           echo "old_root=$OLD_ROOT"
           echo "flat_copy=$FLAT_COPY"
+          echo "baseline=$BASELINE"
+          git show -s --format='baseline_author=%an <%ae>%nbaseline_date=%aI%nbaseline_subject=%s%nbaseline_tree=%T' "$BASELINE"
+          echo "old_root_date=$(git show -s --format=%aI "$OLD_ROOT")"
+          echo "root_readme_blob=$(git rev-parse "$OLD_ROOT:README.md")"
+          echo "baseline_readme_blob=$(git rev-parse "$BASELINE:README.md")"
           echo "post_root_commits=$(git rev-list --count "$OLD_ROOT..$OLD_DEV2")"
           echo "merge_commits=$(git rev-list --count --merges "$OLD_ROOT..$OLD_DEV2")"
           echo
 
-          python3 - <<'PY'
-          import subprocess
-
-          ROOT = '5252d3a1fd2c5d987a414772f2caf010964b4380'
-
-          def tree(commit):
-              out = subprocess.check_output(['git','ls-tree','-r',commit], text=True)
-              d = {}
-              for line in out.splitlines():
-                  meta, path = line.split('\t', 1)
-                  mode, typ, sha = meta.split()
-                  if typ == 'blob':
-                      d[path] = sha
-              return d
-
-          root = tree(ROOT)
-          commits = subprocess.check_output(['git','rev-list','canonical/main'], text=True).split()
-          scored = []
-          for c in commits:
-              t = tree(c)
-              common_paths = root.keys() & t.keys()
-              exact = sum(root[p] == t[p] for p in common_paths)
-              scored.append((exact, len(common_paths), -abs(len(root)-len(t)), c, len(t)))
-          scored.sort(reverse=True)
-          print('=== upstream baseline candidates by exact path+blob identity ===')
-          for exact, common, size_delta, c, n in scored[:10]:
-              print(f'{c}\texact={exact}\tcommon_paths={common}\troot_files={len(root)}\tupstream_files={n}')
-          best = scored[0][3]
-          with open('/tmp/baseline','w') as f:
-              f.write(best)
-          PY
-
-          BASELINE="$(cat /tmp/baseline)"
-          echo
-          echo "selected_baseline=$BASELINE"
-          git show -s --format='baseline_author=%an <%ae>%nbaseline_date=%aI%nbaseline_subject=%s%nbaseline_tree=%T' "$BASELINE"
-          echo
-
           echo '=== bootstrap delta from canonical baseline ==='
           git diff --stat "$BASELINE" "$OLD_ROOT"
-          echo
-          git diff --name-status "$BASELINE" "$OLD_ROOT"
           echo
 
           echo '=== flattened-copy commit delta ==='
           git show --stat --oneline "$FLAT_COPY"
           echo
 
-          echo '=== old author inventory (root..dev2, including root) ==='
-          git log --reverse --format='%H%x09%an%x09%ae%x09%aI%x09%s' "$OLD_ROOT^!" "$OLD_ROOT..$OLD_DEV2"
+          echo '=== old author inventory ==='
+          { git show -s --format='%H%x09%an%x09%ae%x09%aI%x09%s' "$OLD_ROOT"; git log --reverse --format='%H%x09%an%x09%ae%x09%aI%x09%s' "$OLD_ROOT..$OLD_DEV2"; }
           echo
 
           root_author_name="$(git show -s --format=%an "$OLD_ROOT")"
@@ -152,9 +129,7 @@ jobs:
           for c in new:
               buckets.setdefault(key(c), []).append(c)
 
-          missing = []
-          ambiguous = []
-          rows = []
+          missing, ambiguous, rows = [], [], []
           for c in old:
               hits = buckets.get(key(c), [])
               if not hits:
@@ -175,7 +150,7 @@ jobs:
 
           echo
           echo '=== blame author samples on candidate ==='
-          for path in README.md pytwb_ws/src/cm1/cm1/behavior/setlocations.py pytwb_ws/src/cm1/cm1/lib/actor/cognitive.py; do
+          for path in README.md Dockerfile pytwb_ws/src/cm1/cm1/behavior/setlocations.py pytwb_ws/src/cm1/cm1/lib/actor/cognitive.py; do
             if git cat-file -e "$NEW_HEAD:$path" 2>/dev/null; then
               echo "--- $path"
               git blame -w -M -C -C --line-porcelain "$NEW_HEAD" -- "$path" \
