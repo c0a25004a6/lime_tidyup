@@ -1,0 +1,148 @@
+name: Provenance dev2 migration receipt
+
+on:
+  push:
+    branches:
+      - audit/provenance-dev2-rewrite
+
+permissions:
+  contents: write
+
+jobs:
+  persist:
+    if: contains(github.event.head_commit.message, '[persist-dev2-provenance]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout audit branch with full history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Generate durable mapping and receipt, then remove staging candidate
+        shell: bash
+        env:
+          OLD_DEV2: 66c20a90a2f0a1652716f53df886ac9603fbebb1
+          OLD_ROOT: 5252d3a1fd2c5d987a414772f2caf010964b4380
+          BASELINE: 737274733d018596cef24e5d9f9c7c6e4834159d
+          NEW_DEV2: 22c9578627a5e552352c86071c7a5bd6d6c52a20
+          NEW_ROOT: 8363ae8adcef28c19d2c0370b355bb2953a51647
+          EXPECTED_TREE: d9fcc2aa0a6c6fd28e4d25f412790064b0649534
+          BACKUP_BRANCH: backup/pre-provenance-dev2-66c20a90
+          CANDIDATE_BRANCH: provenance/dev2-rewrite-candidate
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'Yuu'
+          git config user.email '206304251+nekomario28@users.noreply.github.com'
+
+          git fetch origin \
+            "+refs/heads/dev2:refs/remotes/origin/dev2" \
+            "+refs/heads/$BACKUP_BRANCH:refs/remotes/origin/$BACKUP_BRANCH" \
+            "+refs/heads/$CANDIDATE_BRANCH:refs/remotes/origin/$CANDIDATE_BRANCH"
+          test "$(git rev-parse origin/dev2)" = "$NEW_DEV2"
+          test "$(git rev-parse origin/$BACKUP_BRANCH)" = "$OLD_DEV2"
+          test "$(git rev-parse origin/$CANDIDATE_BRANCH)" = "$NEW_DEV2"
+          test "$(git show -s --format=%T "$OLD_DEV2")" = "$EXPECTED_TREE"
+          test "$(git show -s --format=%T "$NEW_DEV2")" = "$EXPECTED_TREE"
+          git diff --exit-code "$OLD_DEV2" "$NEW_DEV2"
+
+          python3 - "$OLD_ROOT" "$OLD_DEV2" "$BASELINE" "$NEW_ROOT" "$NEW_DEV2" <<'PY'
+          import os, subprocess, sys
+          old_root, old_head, baseline, expected_new_root, expected_new_head = sys.argv[1:]
+          def text(*a): return subprocess.check_output(['git',*a], text=True).rstrip('\n')
+          def raw(c): return subprocess.check_output(['git','cat-file','commit',c])
+          def msg(c): return raw(c).split(b'\n\n',1)[1]
+          def parents(c):
+              p=text('show','-s','--format=%P',c)
+              return p.split() if p else []
+          def recreate(c, ps):
+              env=os.environ.copy()
+              env.update({
+                  'GIT_AUTHOR_NAME':text('show','-s','--format=%an',c),
+                  'GIT_AUTHOR_EMAIL':text('show','-s','--format=%ae',c),
+                  'GIT_AUTHOR_DATE':text('show','-s','--format=%aI',c),
+                  'GIT_COMMITTER_NAME':text('show','-s','--format=%cn',c),
+                  'GIT_COMMITTER_EMAIL':text('show','-s','--format=%ce',c),
+                  'GIT_COMMITTER_DATE':text('show','-s','--format=%cI',c),
+              })
+              cmd=['git','commit-tree',text('show','-s','--format=%T',c)]
+              for p in ps: cmd += ['-p',p]
+              return subprocess.check_output(cmd,input=msg(c),env=env).decode().strip()
+          mapping={old_root:recreate(old_root,[baseline])}
+          ordered=text('rev-list','--reverse','--topo-order',f'{old_root}..{old_head}').splitlines()
+          for c in ordered:
+              mapping[c]=recreate(c,[mapping[p] for p in parents(c)])
+          if mapping[old_root] != expected_new_root:
+              raise SystemExit('new root mismatch')
+          if mapping[old_head] != expected_new_head:
+              raise SystemExit('new head mismatch')
+          os.makedirs('docs',exist_ok=True)
+          with open('docs/provenance-dev2-old-to-new.tsv','w',encoding='utf-8') as f:
+              f.write('old_sha\tnew_sha\n')
+              for c in [old_root]+ordered:
+                  f.write(f'{c}\t{mapping[c]}\n')
+          print(f'mapping_count={len(mapping)}')
+          PY
+
+          cat > docs/provenance-dev2-rewrite-2026-08-25.md <<'EOF'
+          # dev2 provenance history repair — 2026-08-25
+
+          Status: COMPLETED
+          Scope: `dev2` only. `main`, `dev`, `arm`, `voice`, and other pre-existing branches were not rewritten.
+
+          ## Source boundary
+
+          - Repository: `nekomario28/lime_tidyup`
+          - Canonical source: `momoiorg-repository/LimeSimulDemo`
+          - Canonical baseline: `737274733d018596cef24e5d9f9c7c6e4834159d`
+          - Baseline Author: Kazuya Tago `<ktago.gm@gmail.com>`
+          - Old standalone root: `5252d3a1fd2c5d987a414772f2caf010964b4380`
+          - Old dev2: `66c20a90a2f0a1652716f53df886ac9603fbebb1`
+          - New root: `8363ae8adcef28c19d2c0370b355bb2953a51647`
+          - New dev2: `22c9578627a5e552352c86071c7a5bd6d6c52a20`
+          - Content tree before/after: `d9fcc2aa0a6c6fd28e4d25f412790064b0649534`
+          - Exact old backup: `backup/pre-provenance-dev2-66c20a90`
+
+          The old standalone root reused the exact canonical README blob from the baseline. The repair grafted that local root onto the canonical baseline, then recreated all 72 local commits with their exact old trees, Author/AuthorDate, Committer/CommitterDate, messages, and merge topology; only parent object IDs changed.
+
+          ## Validation evidence
+
+          - Read-only preview run: `32832980025` — SUCCESS
+          - Candidate staging run: `32833146806` — SUCCESS
+          - Coordinated rewrite run: `32833519985` — SUCCESS
+          - 72/72 local commits mapped old→new
+          - final tree equality: PASS
+          - `git diff old_dev2 new_dev2`: empty
+          - open PRs touching `dev2`: 0 at execution
+          - tags containing the old root/dev2: none at execution
+          - releases: 0 at execution
+          - update method: `git push --force-with-lease=refs/heads/dev2:<old_sha>`
+
+          ## Line-level provenance after repair
+
+          Representative `git blame -w -M -C -C` results from the verified candidate:
+
+          - `README.md`: 96 lines Kazuya Tago
+          - `Dockerfile`: 73 Kazuya Tago; 23 Yuu Akaoka; 20 c0a2504494; 2 yulat214
+          - `pytwb_ws/src/cm1/cm1/behavior/setlocations.py`: 34 Kazuya Tago; 8 Yuu Akaoka; 7 Yuu
+          - `pytwb_ws/src/cm1/cm1/lib/actor/cognitive.py`: 245 Kazuya Tago; 229 Yuu Akaoka; 11 c0a2504494
+
+          This demonstrates why canonical-ref reachability and line-level blame are stronger provenance evidence than merely resolving a SHA through a GitHub fork network.
+
+          ## Mapping
+
+          The complete 72-entry old→new SHA map is stored in `docs/provenance-dev2-old-to-new.tsv` beside this receipt.
+          EOF
+
+          git add docs/provenance-dev2-old-to-new.tsv docs/provenance-dev2-rewrite-2026-08-25.md
+          git commit -m 'docs: persist dev2 provenance rewrite receipt'
+          git push origin HEAD:refs/heads/audit/provenance-dev2-rewrite
+
+          # Candidate is no longer needed once dev2 itself is exact and the receipt is durable.
+          test "$(git ls-remote --heads origin refs/heads/dev2 | awk '{print $1}')" = "$NEW_DEV2"
+          test "$(git ls-remote --heads origin refs/heads/$CANDIDATE_BRANCH | awk '{print $1}')" = "$NEW_DEV2"
+          git push origin ":refs/heads/$CANDIDATE_BRANCH"
+          test -z "$(git ls-remote --heads origin refs/heads/$CANDIDATE_BRANCH)"
+          test "$(git ls-remote --heads origin refs/heads/$BACKUP_BRANCH | awk '{print $1}')" = "$OLD_DEV2"
+
+          echo 'PERSIST_AND_CLEANUP_GREEN'
