@@ -1,0 +1,139 @@
+name: cube8-runtime-ci
+
+on:
+  push:
+    branches:
+      - work/dev2-cube8-runtime-20260826
+    paths:
+      - .github/workflows/cube8-runtime-ci.yml
+      - Dockerfile.yolo
+      - yolo_ws/visualize_cube8_pipeline.py
+      - yolo_ws/cube8_runtime_smoke.py
+      - yolo_ws/src/barcode_detector/setup.py
+      - yolo_ws/src/barcode_detector/barcode_detector/cube8_*.py
+
+permissions:
+  contents: write
+
+jobs:
+  verify:
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 20
+    env:
+      EXPECTED_ONNX_SHA256: 3c04a6939c736a1730b2b0c93c66a10cf60b29e48fc545b1a0c7515aa23dacac
+    steps:
+      - name: Repair workspace ownership
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --network host \
+            -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+            -v "$GITHUB_WORKSPACE:/work" ros:humble-ros-base-jammy \
+            bash -lc 'chown -R "$HOST_UID:$HOST_GID" /work'
+
+      - uses: actions/checkout@v4
+
+      - name: Stage retained Cube8 ONNX
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_onnx="$HOME/Videos/lime/cube8-rtmpose/32595602886-3-recovery-32773097860/model.onnx"
+          test -s "$source_onnx"
+          actual="$(sha256sum "$source_onnx" | awk '{print $1}')"
+          test "$actual" = "$EXPECTED_ONNX_SHA256"
+          bytes="$(stat -c '%s' "$source_onnx")"
+          echo "retained Cube8 ONNX bytes=$bytes sha256=$actual"
+          test "$bytes" -lt 100000000
+          mkdir -p yolo_ws/models
+          cp "$source_onnx" yolo_ws/models/cube8-rtmpose-retained.onnx
+          test "$(sha256sum yolo_ws/models/cube8-rtmpose-retained.onnx | awk '{print $1}')" = "$EXPECTED_ONNX_SHA256"
+
+      - name: Static-check migrated runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            yolo_ws/visualize_cube8_pipeline.py \
+            yolo_ws/cube8_runtime_smoke.py \
+            yolo_ws/src/barcode_detector/barcode_detector/cube8_geometry.py \
+            yolo_ws/src/barcode_detector/barcode_detector/cube8_rtmpose.py \
+            yolo_ws/src/barcode_detector/barcode_detector/cube8_pnp.py \
+            yolo_ws/src/barcode_detector/barcode_detector/cube8_grasp.py \
+            yolo_ws/src/barcode_detector/barcode_detector/cube8_transform.py \
+            yolo_ws/src/barcode_detector/barcode_detector/cube8_pose_node.py
+
+      - name: Build Cube8 runtime image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="yolo_ros2-image_yuu:cube8-${GITHUB_SHA}"
+          docker build --network host -f Dockerfile.yolo -t "$image" .
+          echo "CUBE8_IMAGE=$image" >> "$GITHUB_ENV"
+
+      - name: Build ROS package and run synthetic PnP grasp smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --network host \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp -e YOLO_CONFIG_DIR=/tmp/Ultralytics \
+            -v "$GITHUB_WORKSPACE/yolo_ws:/root/yolo_ws:rw" \
+            -w /root/yolo_ws "$CUBE8_IMAGE" bash -lc '
+              source /opt/ros/humble/setup.bash
+              colcon build --packages-select barcode_detector
+              PYTHONPATH=/root/yolo_ws/src/barcode_detector python3 cube8_runtime_smoke.py
+            '
+
+      - name: Render actual dev2 sample with YOLO bbox plus Cube8 RTMPose
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --network host \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp -e YOLO_CONFIG_DIR=/tmp/Ultralytics \
+            -v "$GITHUB_WORKSPACE/yolo_ws:/root/yolo_ws:rw" \
+            -w /root/yolo_ws "$CUBE8_IMAGE" \
+            python3 visualize_cube8_pipeline.py \
+              --image sample.png \
+              --detector runs/pose/train-2/weights/best.pt \
+              --rtmpose models/cube8-rtmpose-retained.onnx \
+              --output-image sample_cube8_debug.jpg \
+              --output-json sample_cube8_debug.json \
+              --conf 0.25
+          test -s yolo_ws/sample_cube8_debug.jpg
+          test -s yolo_ws/sample_cube8_debug.json
+          python3 - <<'PY'
+          import json
+          doc=json.load(open("yolo_ws/sample_cube8_debug.json"))
+          assert len(doc["rtmpose"]["keypoints"]) == 8
+          assert doc["pipeline"] == "yolo_bbox+cube8_rtmpose"
+          assert doc["grasp"]["execution_authorized"] is False
+          print(json.dumps(doc,indent=2))
+          PY
+
+      - name: Upload sample visualization
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev2-cube8-runtime-sample
+          path: |
+            yolo_ws/sample_cube8_debug.jpg
+            yolo_ws/sample_cube8_debug.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Persist runtime model and sample evidence on work branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            yolo_ws/models/cube8-rtmpose-retained.onnx \
+            yolo_ws/sample_cube8_debug.jpg \
+            yolo_ws/sample_cube8_debug.json
+          if git diff --cached --quiet; then
+            echo "binary runtime/evidence already identical"
+            exit 0
+          fi
+          git commit -m 'runtime: stage retained Cube8 model and sample evidence'
+          git push origin "HEAD:${GITHUB_REF_NAME}"

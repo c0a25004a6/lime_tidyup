@@ -15,7 +15,7 @@ setup(
     zip_safe=True,
     maintainer='root',
     maintainer_email='root@todo.todo',
-    description='YOLO pose detector package',
+    description='YOLO bbox + Cube8 RTMPose detector and pose package',
     license='TODO',
     tests_require=['pytest'],
     entry_points={
@@ -23,6 +23,7 @@ setup(
             'roboflow_node = barcode_detector.roboflow_node:main',
             'yolo_pose_node = barcode_detector.yolo_pose_node:main',
             'yolo_save_node = barcode_detector.yolo_save_node:main',
+            'cube8_pose_node = barcode_detector.cube8_pose_node:main',
         ],
     },
 )

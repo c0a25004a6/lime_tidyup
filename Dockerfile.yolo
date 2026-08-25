@@ -17,16 +17,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel
 
+# Legacy YOLO detector stays detector-only. Cube8 RTMPose owns the ordered 8 vertices.
 RUN python3 -m pip install --no-cache-dir --ignore-installed \
     numpy==1.26.4 \
     matplotlib==3.8.4 \
     opencv-python-headless==4.10.0.84 \
+    onnxruntime==1.20.1 \
     ultralytics \
     roboflow \
     inference-sdk
 
+# Exact RTMLib source identity inherited from the Cube8 diagnostic lane.
+ARG RTMLIB_COMMIT=03a1693e59e4f7cd84582c0fb30459b3bf18ad42
+RUN git init /opt/rtmlib \
+    && git -C /opt/rtmlib remote add origin https://github.com/Tau-J/rtmlib.git \
+    && git -C /opt/rtmlib fetch --depth 1 origin "$RTMLIB_COMMIT" \
+    && git -C /opt/rtmlib checkout --detach FETCH_HEAD \
+    && test "$(git -C /opt/rtmlib rev-parse HEAD)" = "$RTMLIB_COMMIT" \
+    && site_dir="$(python3 -c 'import site; print(site.getsitepackages()[0])')" \
+    && printf '%s\n' /opt/rtmlib > "$site_dir/rtmlib-exact-source.pth"
+
 WORKDIR /root/yolo_ws
-RUN mkdir -p src /root/bin
+RUN mkdir -p src /root/bin models
 
 RUN echo "source /opt/ros/humble/setup.bash" >> /root/.bashrc && \
     echo "if [ -f /root/yolo_ws/install/setup.bash ]; then source /root/yolo_ws/install/setup.bash; fi" >> /root/.bashrc && \
