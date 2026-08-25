@@ -1,0 +1,84 @@
+name: sample-cube-viz-ci
+
+on:
+  push:
+    branches:
+      - work/dev2-sample-viz-20260826
+    paths:
+      - .github/workflows/sample-cube-viz-ci.yml
+      - yolo_ws/visualize_sample_cube_debug.py
+
+permissions:
+  contents: write
+
+jobs:
+  render:
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify pinned dev2 sample inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s yolo_ws/sample.png
+          test -s yolo_ws/runs/pose/train-2/weights/best.pt
+          test -s yolo_ws/visualize_sample_cube_debug.py
+          file yolo_ws/sample.png || true
+          sha256sum yolo_ws/sample.png yolo_ws/runs/pose/train-2/weights/best.pt
+
+      - name: Ensure YOLO runtime image
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! docker image inspect yolo_ros2-image_yuu >/dev/null 2>&1; then
+            docker build -f Dockerfile.yolo -t yolo_ros2-image_yuu .
+          fi
+
+      - name: Render actual sample prediction overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f yolo_ws/sample_prediction_debug.jpg yolo_ws/sample_prediction_debug.json
+          docker run --rm --network host \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            -e YOLO_CONFIG_DIR=/tmp/Ultralytics \
+            -v "$GITHUB_WORKSPACE/yolo_ws:/root/yolo_ws:rw" \
+            yolo_ros2-image_yuu \
+            bash -lc 'cd /root/yolo_ws && python3 visualize_sample_cube_debug.py \
+              --image sample.png \
+              --model runs/pose/train-2/weights/best.pt \
+              --out-image sample_prediction_debug.jpg \
+              --out-json sample_prediction_debug.json \
+              --conf 0.25'
+          test -s yolo_ws/sample_prediction_debug.jpg
+          test -s yolo_ws/sample_prediction_debug.json
+          cat yolo_ws/sample_prediction_debug.json
+          file yolo_ws/sample_prediction_debug.jpg || true
+          ls -lh yolo_ws/sample_prediction_debug.jpg yolo_ws/sample_prediction_debug.json
+
+      - name: Upload visualization evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev2-sample-cube-viz
+          path: |
+            yolo_ws/sample_prediction_debug.jpg
+            yolo_ws/sample_prediction_debug.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Persist visualization on isolated work branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add yolo_ws/sample_prediction_debug.jpg yolo_ws/sample_prediction_debug.json
+          if git diff --cached --quiet; then
+            echo 'visualization already identical'
+            exit 0
+          fi
+          git commit -m 'evidence: render dev2 sample YOLO pose'
+          git push origin "HEAD:${GITHUB_REF_NAME}"
