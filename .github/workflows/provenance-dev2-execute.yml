@@ -1,0 +1,97 @@
+name: Provenance dev2 coordinated rewrite
+
+on:
+  push:
+    branches:
+      - audit/provenance-dev2-rewrite
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  execute:
+    if: contains(github.event.head_commit.message, '[execute-dev2-provenance]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout audit branch with full history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Verify candidate, back up old dev2, and lease-update dev2 only
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OLD_DEV2: 66c20a90a2f0a1652716f53df886ac9603fbebb1
+          OLD_ROOT: 5252d3a1fd2c5d987a414772f2caf010964b4380
+          BASELINE: 737274733d018596cef24e5d9f9c7c6e4834159d
+          CANDIDATE: 22c9578627a5e552352c86071c7a5bd6d6c52a20
+          EXPECTED_TREE: d9fcc2aa0a6c6fd28e4d25f412790064b0649534
+          BACKUP_REF: refs/heads/backup/pre-provenance-dev2-66c20a90
+          CANDIDATE_REF: refs/heads/provenance/dev2-rewrite-candidate
+        run: |
+          set -Eeuo pipefail
+
+          git fetch origin dev2 "$CANDIDATE_REF" '+refs/tags/*:refs/tags/*'
+          test "$(git rev-parse origin/dev2)" = "$OLD_DEV2"
+          test "$(git rev-parse FETCH_HEAD)" || true
+          test "$(git rev-parse "$CANDIDATE_REF" 2>/dev/null || git rev-parse origin/provenance/dev2-rewrite-candidate)" = "$CANDIDATE"
+          test "$(git show -s --format=%T "$OLD_DEV2")" = "$EXPECTED_TREE"
+          test "$(git show -s --format=%T "$CANDIDATE")" = "$EXPECTED_TREE"
+          git diff --exit-code "$OLD_DEV2" "$CANDIDATE"
+          git merge-base --is-ancestor "$BASELINE" "$CANDIDATE"
+          if git merge-base --is-ancestor "$OLD_ROOT" "$CANDIDATE"; then
+            echo 'old standalone root remains in candidate ancestry' >&2
+            exit 1
+          fi
+
+          echo '=== tags containing old standalone root ==='
+          git tag --contains "$OLD_ROOT" || true
+          echo '=== tags containing old dev2 head ==='
+          git tag --contains "$OLD_DEV2" || true
+
+          python3 - <<'PY'
+          import json, os, subprocess
+          repo = os.environ['GITHUB_REPOSITORY']
+          data = json.loads(subprocess.check_output([
+              'gh','api',f'repos/{repo}/pulls','-f','state=open','-f','per_page=100'
+          ], text=True))
+          touching = [p for p in data if p['base']['ref']=='dev2' or p['head']['ref']=='dev2']
+          print(f'open_prs_touching_dev2={len(touching)}')
+          if touching:
+              for p in touching:
+                  print(p['number'], p['base']['ref'], p['head']['ref'])
+              raise SystemExit(1)
+          PY
+
+          # Preserve the exact previous dev2 tip. Never overwrite a different backup.
+          existing_backup="$(git ls-remote --heads origin "$BACKUP_REF" | awk '{print $1}')"
+          if [ -z "$existing_backup" ]; then
+            git push origin "$OLD_DEV2:$BACKUP_REF"
+          else
+            test "$existing_backup" = "$OLD_DEV2"
+          fi
+
+          # Final freshness check immediately before the history move.
+          git fetch origin dev2
+          test "$(git rev-parse origin/dev2)" = "$OLD_DEV2"
+          remote_candidate="$(git ls-remote --heads origin "$CANDIDATE_REF" | awk '{print $1}')"
+          test "$remote_candidate" = "$CANDIDATE"
+
+          git push --force-with-lease="refs/heads/dev2:$OLD_DEV2" origin "$CANDIDATE:refs/heads/dev2"
+
+          git fetch origin dev2
+          NEW_DEV2="$(git rev-parse origin/dev2)"
+          test "$NEW_DEV2" = "$CANDIDATE"
+          test "$(git show -s --format=%T "$NEW_DEV2")" = "$EXPECTED_TREE"
+          git merge-base --is-ancestor "$BASELINE" "$NEW_DEV2"
+          if git merge-base --is-ancestor "$OLD_ROOT" "$NEW_DEV2"; then exit 1; fi
+          test "$(git ls-remote --heads origin "$BACKUP_REF" | awk '{print $1}')" = "$OLD_DEV2"
+
+          echo "old_dev2=$OLD_DEV2"
+          echo "new_dev2=$NEW_DEV2"
+          echo "backup=$OLD_DEV2"
+          echo "tree=$EXPECTED_TREE"
+          echo 'DEV2_REWRITE_GREEN'
