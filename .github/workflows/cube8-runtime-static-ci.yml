@@ -1,0 +1,36 @@
+name: cube8-runtime-static-ci
+
+on:
+  push:
+    branches:
+      - work/dev2-cube8-runtime-20260826
+    paths:
+      - .github/workflows/cube8-runtime-static-ci.yml
+      - yolo_ws/cube8_runtime_smoke.py
+      - yolo_ws/src/barcode_detector/barcode_detector/cube8_geometry.py
+      - yolo_ws/src/barcode_detector/barcode_detector/cube8_pnp.py
+      - yolo_ws/src/barcode_detector/barcode_detector/cube8_grasp.py
+      - yolo_ws/src/barcode_detector/barcode_detector/cube8_transform.py
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile migrated pure runtime
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            yolo_ws/cube8_runtime_smoke.py \
+            yolo_ws/src/barcode_detector/barcode_detector/cube8_geometry.py \
+            yolo_ws/src/barcode_detector/barcode_detector/cube8_pnp.py \
+            yolo_ws/src/barcode_detector/barcode_detector/cube8_grasp.py \
+            yolo_ws/src/barcode_detector/barcode_detector/cube8_transform.py
+      - name: Install geometry smoke dependencies
+        run: python3 -m pip install numpy==1.26.4 opencv-python-headless==4.10.0.84
+      - name: Run synthetic PnP plus grasp-frame smoke
+        run: |
+          set -euo pipefail
+          PYTHONPATH="$GITHUB_WORKSPACE/yolo_ws/src/barcode_detector" \
+            python3 yolo_ws/cube8_runtime_smoke.py
