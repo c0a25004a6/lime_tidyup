@@ -7,8 +7,11 @@ on:
     paths:
       - .github/workflows/cube8-runtime-static-ci.yml
       - yolo_ws/cube8_runtime_smoke.py
+      - yolo_ws/cube8_hidden_pnp_smoke.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_geometry.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_pnp.py
+      - yolo_ws/src/barcode_detector/barcode_detector/cube8_pnp_assist.py
+      - yolo_ws/src/barcode_detector/barcode_detector/cube8_projective_hidden.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_grasp.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_transform.py
 
@@ -42,8 +45,11 @@ jobs:
           set -euo pipefail
           python3 -m py_compile \
             yolo_ws/cube8_runtime_smoke.py \
+            yolo_ws/cube8_hidden_pnp_smoke.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_geometry.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_pnp.py \
+            yolo_ws/src/barcode_detector/barcode_detector/cube8_pnp_assist.py \
+            yolo_ws/src/barcode_detector/barcode_detector/cube8_projective_hidden.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_grasp.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_transform.py
       - name: Install geometry smoke dependencies
@@ -53,3 +59,8 @@ jobs:
           set -euo pipefail
           PYTHONPATH="$GITHUB_WORKSPACE/yolo_ws/src/barcode_detector" \
             python3 yolo_ws/cube8_runtime_smoke.py
+      - name: Run hidden-corner plus independent seven-point PnP smoke
+        run: |
+          set -euo pipefail
+          PYTHONPATH="$GITHUB_WORKSPACE/yolo_ws/src/barcode_detector" \
+            python3 yolo_ws/cube8_hidden_pnp_smoke.py
