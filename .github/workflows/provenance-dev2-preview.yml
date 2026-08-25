@@ -28,9 +28,6 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          git config user.name 'Provenance Replay'
-          git config user.email '206304251+nekomario28@users.noreply.github.com'
-
           git remote remove canonical 2>/dev/null || true
           git remote add canonical https://github.com/momoiorg-repository/LimeSimulDemo.git
           git fetch --no-tags canonical main
@@ -41,13 +38,8 @@ jobs:
           git merge-base --is-ancestor "$OLD_ROOT" "$FLAT_COPY"
           git merge-base --is-ancestor "$FLAT_COPY" "$OLD_DEV2"
           git merge-base --is-ancestor "$BASELINE" canonical/main
-
-          # Strong source-boundary evidence: the standalone root carries the exact
-          # README blob from canonical 737274..., which predates it by three days.
           test "$(git rev-parse "$OLD_ROOT:README.md")" = "$(git rev-parse "$BASELINE:README.md")"
-          root_epoch="$(git show -s --format=%at "$OLD_ROOT")"
-          baseline_epoch="$(git show -s --format=%at "$BASELINE")"
-          test "$baseline_epoch" -lt "$root_epoch"
+          test "$(git show -s --format=%at "$BASELINE")" -lt "$(git show -s --format=%at "$OLD_ROOT")"
 
           echo '=== source boundary ==='
           echo "old_dev2=$OLD_DEV2"
@@ -58,46 +50,84 @@ jobs:
           echo "old_root_date=$(git show -s --format=%aI "$OLD_ROOT")"
           echo "root_readme_blob=$(git rev-parse "$OLD_ROOT:README.md")"
           echo "baseline_readme_blob=$(git rev-parse "$BASELINE:README.md")"
-          echo "post_root_commits=$(git rev-list --count "$OLD_ROOT..$OLD_DEV2")"
+          echo "local_commit_count=$((1 + $(git rev-list --count "$OLD_ROOT..$OLD_DEV2")))"
           echo "merge_commits=$(git rev-list --count --merges "$OLD_ROOT..$OLD_DEV2")"
           echo
 
           echo '=== bootstrap delta from canonical baseline ==='
           git diff --stat "$BASELINE" "$OLD_ROOT"
           echo
-
           echo '=== flattened-copy commit delta ==='
           git show --stat --oneline "$FLAT_COPY"
           echo
 
-          echo '=== old author inventory ==='
-          { git show -s --format='%H%x09%an%x09%ae%x09%aI%x09%s' "$OLD_ROOT"; git log --reverse --format='%H%x09%an%x09%ae%x09%aI%x09%s' "$OLD_ROOT..$OLD_DEV2"; }
+          # This is an ancestry graft, not a content replay. Recreate each local
+          # commit with its exact old tree and metadata, remapping only parents.
+          # This preserves merge topology without conflict resolution changing code.
+          python3 - "$OLD_ROOT" "$OLD_DEV2" "$BASELINE" <<'PY'
+          import os
+          import subprocess
+          import sys
+
+          old_root, old_head, baseline = sys.argv[1:]
+
+          def text(*args):
+              return subprocess.check_output(['git', *args], text=True).rstrip('\n')
+
+          def message(commit):
+              raw = subprocess.check_output(['git', 'cat-file', 'commit', commit])
+              return raw.split(b'\n\n', 1)[1]
+
+          def parents(commit):
+              p = text('show', '-s', '--format=%P', commit)
+              return p.split() if p else []
+
+          def recreate(commit, new_parents):
+              env = os.environ.copy()
+              env.update({
+                  'GIT_AUTHOR_NAME': text('show','-s','--format=%an',commit),
+                  'GIT_AUTHOR_EMAIL': text('show','-s','--format=%ae',commit),
+                  'GIT_AUTHOR_DATE': text('show','-s','--format=%aI',commit),
+                  'GIT_COMMITTER_NAME': text('show','-s','--format=%cn',commit),
+                  'GIT_COMMITTER_EMAIL': text('show','-s','--format=%ce',commit),
+                  'GIT_COMMITTER_DATE': text('show','-s','--format=%cI',commit),
+              })
+              cmd = ['git','commit-tree',text('show','-s','--format=%T',commit)]
+              for p in new_parents:
+                  cmd += ['-p', p]
+              return subprocess.check_output(cmd, input=message(commit), env=env).decode().strip()
+
+          mapping = {}
+          new_root = recreate(old_root, [baseline])
+          mapping[old_root] = new_root
+
+          ordered = text('rev-list','--reverse','--topo-order',f'{old_root}..{old_head}').splitlines()
+          for commit in ordered:
+              old_parents = parents(commit)
+              missing = [p for p in old_parents if p not in mapping]
+              if missing:
+                  raise SystemExit(f'unmapped parent(s) for {commit}: {missing}')
+              mapping[commit] = recreate(commit, [mapping[p] for p in old_parents])
+
+          new_head = mapping[old_head]
+          print('=== old -> new mapping ===')
+          for old in [old_root] + ordered:
+              print(f'{old}\t{mapping[old]}')
+          print(f'mapping_count={len(mapping)}')
+          print(f'new_root={new_root}')
+          print(f'new_head={new_head}')
+          with open('/tmp/new_root','w') as f: f.write(new_root)
+          with open('/tmp/new_head','w') as f: f.write(new_head)
+          with open('/tmp/mapping.tsv','w') as f:
+              for old in [old_root] + ordered:
+                  f.write(f'{old}\t{mapping[old]}\n')
+          PY
+
+          NEW_ROOT="$(cat /tmp/new_root)"
+          NEW_HEAD="$(cat /tmp/new_head)"
+
           echo
-
-          root_author_name="$(git show -s --format=%an "$OLD_ROOT")"
-          root_author_email="$(git show -s --format=%ae "$OLD_ROOT")"
-          root_author_date="$(git show -s --format=%aI "$OLD_ROOT")"
-          root_committer_name="$(git show -s --format=%cn "$OLD_ROOT")"
-          root_committer_email="$(git show -s --format=%ce "$OLD_ROOT")"
-          root_committer_date="$(git show -s --format=%cI "$OLD_ROOT")"
-          root_tree="$(git show -s --format=%T "$OLD_ROOT")"
-          git show -s --format=%B "$OLD_ROOT" >/tmp/root-message
-
-          export GIT_AUTHOR_NAME="$root_author_name"
-          export GIT_AUTHOR_EMAIL="$root_author_email"
-          export GIT_AUTHOR_DATE="$root_author_date"
-          export GIT_COMMITTER_NAME="$root_committer_name"
-          export GIT_COMMITTER_EMAIL="$root_committer_email"
-          export GIT_COMMITTER_DATE="$root_committer_date"
-          NEW_ROOT="$(git commit-tree "$root_tree" -p "$BASELINE" </tmp/root-message)"
-          unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
-
-          git branch -f provenance-preview "$OLD_DEV2"
-          git switch provenance-preview
-          git rebase --rebase-merges --onto "$NEW_ROOT" "$OLD_ROOT"
-          NEW_HEAD="$(git rev-parse HEAD)"
-
-          echo '=== candidate ==='
+          echo '=== candidate gates ==='
           echo "new_root=$NEW_ROOT"
           echo "new_head=$NEW_HEAD"
           echo "old_tree=$(git show -s --format=%T "$OLD_DEV2")"
@@ -110,43 +140,16 @@ jobs:
             echo 'old standalone root unexpectedly remains an ancestor' >&2
             exit 1
           fi
+          test "$(wc -l </tmp/mapping.tsv)" -eq "$((1 + $(git rev-list --count "$OLD_ROOT..$OLD_DEV2")))"
 
-          python3 - "$OLD_ROOT" "$OLD_DEV2" "$NEW_ROOT" "$NEW_HEAD" <<'PY'
-          import subprocess, sys
-          old_root, old_head, new_root, new_head = sys.argv[1:]
-
-          def commits(rng):
-              return subprocess.check_output(['git','rev-list','--reverse',rng], text=True).split()
-
-          old = [old_root] + commits(f'{old_root}..{old_head}')
-          new = [new_root] + commits(f'{new_root}..{new_head}')
-
-          def key(c):
-              fmt = '%T%x00%an%x00%ae%x00%aI%x00%B'
-              return subprocess.check_output(['git','show','-s',f'--format={fmt}',c], text=True)
-
-          buckets = {}
-          for c in new:
-              buckets.setdefault(key(c), []).append(c)
-
-          missing, ambiguous, rows = [], [], []
-          for c in old:
-              hits = buckets.get(key(c), [])
-              if not hits:
-                  missing.append(c)
-              elif len(hits) != 1:
-                  ambiguous.append((c, hits))
-              else:
-                  rows.append((c, hits[0]))
-
-          print('=== old -> new mapping ===')
-          for a,b in rows:
-              print(f'{a}\t{b}')
-          print(f'mapping_count={len(rows)} old_count={len(old)} new_count={len(new)}')
-          print(f'missing={len(missing)} ambiguous={len(ambiguous)}')
-          if missing or ambiguous or len(old) != len(new):
-              raise SystemExit(1)
-          PY
+          # Every local commit must preserve tree, Author, AuthorDate, Committer,
+          # CommitterDate, message and parent count. Only parent object IDs may differ.
+          while IFS=$'\t' read -r old new; do
+            test "$(git show -s --format=%T "$old")" = "$(git show -s --format=%T "$new")"
+            test "$(git show -s --format='%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%B' "$old")" = \
+                 "$(git show -s --format='%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%B' "$new")"
+            test "$(git show -s --format=%P "$old" | wc -w)" = "$(git show -s --format=%P "$new" | wc -w)"
+          done </tmp/mapping.tsv
 
           echo
           echo '=== blame author samples on candidate ==='
