@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   preview:
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - name: Checkout audit branch with full history
