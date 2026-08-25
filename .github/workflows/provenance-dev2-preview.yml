@@ -61,9 +61,6 @@ jobs:
           git show --stat --oneline "$FLAT_COPY"
           echo
 
-          # This is an ancestry graft, not a content replay. Recreate each local
-          # commit with its exact old tree and metadata, remapping only parents.
-          # This preserves merge topology without conflict resolution changing code.
           python3 - "$OLD_ROOT" "$OLD_DEV2" "$BASELINE" <<'PY'
           import os
           import subprocess
@@ -74,9 +71,11 @@ jobs:
           def text(*args):
               return subprocess.check_output(['git', *args], text=True).rstrip('\n')
 
+          def raw_commit(commit):
+              return subprocess.check_output(['git', 'cat-file', 'commit', commit])
+
           def message(commit):
-              raw = subprocess.check_output(['git', 'cat-file', 'commit', commit])
-              return raw.split(b'\n\n', 1)[1]
+              return raw_commit(commit).split(b'\n\n', 1)[1]
 
           def parents(commit):
               p = text('show', '-s', '--format=%P', commit)
@@ -142,14 +141,43 @@ jobs:
           fi
           test "$(wc -l </tmp/mapping.tsv)" -eq "$((1 + $(git rev-list --count "$OLD_ROOT..$OLD_DEV2")))"
 
-          # Every local commit must preserve tree, Author, AuthorDate, Committer,
-          # CommitterDate, message and parent count. Only parent object IDs may differ.
-          while IFS=$'\t' read -r old new; do
-            test "$(git show -s --format=%T "$old")" = "$(git show -s --format=%T "$new")"
-            test "$(git show -s --format='%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%B' "$old")" = \
-                 "$(git show -s --format='%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI%x00%B' "$new")"
-            test "$(git show -s --format=%P "$old" | wc -w)" = "$(git show -s --format=%P "$new" | wc -w)"
-          done </tmp/mapping.tsv
+          python3 - /tmp/mapping.tsv <<'PY'
+          import subprocess
+          import sys
+
+          mapping_path = sys.argv[1]
+
+          def raw(commit):
+              return subprocess.check_output(['git','cat-file','commit',commit])
+
+          def parse(commit):
+              header, message = raw(commit).split(b'\n\n', 1)
+              lines = header.splitlines()
+              tree = next(x.split(b' ', 1)[1] for x in lines if x.startswith(b'tree '))
+              parents = [x.split(b' ', 1)[1] for x in lines if x.startswith(b'parent ')]
+              author = next(x for x in lines if x.startswith(b'author '))
+              committer = next(x for x in lines if x.startswith(b'committer '))
+              return tree, parents, author, committer, message
+
+          count = 0
+          with open(mapping_path, encoding='utf-8') as f:
+              for line in f:
+                  old, new = line.rstrip('\n').split('\t')
+                  otree, oparents, oauthor, ocommitter, omsg = parse(old)
+                  ntree, nparents, nauthor, ncommitter, nmsg = parse(new)
+                  if otree != ntree:
+                      raise SystemExit(f'tree mismatch: {old} -> {new}')
+                  if oauthor != nauthor:
+                      raise SystemExit(f'author header mismatch: {old} -> {new}')
+                  if ocommitter != ncommitter:
+                      raise SystemExit(f'committer header mismatch: {old} -> {new}')
+                  if omsg != nmsg:
+                      raise SystemExit(f'message mismatch: {old} -> {new}')
+                  if len(oparents) != len(nparents):
+                      raise SystemExit(f'parent-count mismatch: {old} -> {new}')
+                  count += 1
+          print(f'exact_metadata_gate_count={count}')
+          PY
 
           echo
           echo '=== blame author samples on candidate ==='
