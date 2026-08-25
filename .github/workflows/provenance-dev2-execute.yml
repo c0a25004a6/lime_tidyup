@@ -34,10 +34,12 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          git fetch origin dev2 "$CANDIDATE_REF" '+refs/tags/*:refs/tags/*'
+          git fetch origin \
+            '+refs/heads/dev2:refs/remotes/origin/dev2' \
+            '+refs/heads/provenance/dev2-rewrite-candidate:refs/remotes/origin/provenance/dev2-rewrite-candidate' \
+            '+refs/tags/*:refs/tags/*'
           test "$(git rev-parse origin/dev2)" = "$OLD_DEV2"
-          test "$(git rev-parse FETCH_HEAD)" || true
-          test "$(git rev-parse "$CANDIDATE_REF" 2>/dev/null || git rev-parse origin/provenance/dev2-rewrite-candidate)" = "$CANDIDATE"
+          test "$(git rev-parse origin/provenance/dev2-rewrite-candidate)" = "$CANDIDATE"
           test "$(git show -s --format=%T "$OLD_DEV2")" = "$EXPECTED_TREE"
           test "$(git show -s --format=%T "$CANDIDATE")" = "$EXPECTED_TREE"
           git diff --exit-code "$OLD_DEV2" "$CANDIDATE"
@@ -55,15 +57,25 @@ jobs:
           python3 - <<'PY'
           import json, os, subprocess
           repo = os.environ['GITHUB_REPOSITORY']
-          data = json.loads(subprocess.check_output([
-              'gh','api',f'repos/{repo}/pulls','-f','state=open','-f','per_page=100'
+          pulls = json.loads(subprocess.check_output([
+              'gh','api','--method','GET',f'repos/{repo}/pulls',
+              '-f','state=open','-f','per_page=100'
           ], text=True))
-          touching = [p for p in data if p['base']['ref']=='dev2' or p['head']['ref']=='dev2']
+          touching = [p for p in pulls if p['base']['ref']=='dev2' or p['head']['ref']=='dev2']
           print(f'open_prs_touching_dev2={len(touching)}')
           if touching:
               for p in touching:
                   print(p['number'], p['base']['ref'], p['head']['ref'])
               raise SystemExit(1)
+
+          releases = json.loads(subprocess.check_output([
+              'gh','api','--method','GET',f'repos/{repo}/releases','-f','per_page=100'
+          ], text=True))
+          affected = [r for r in releases if r.get('target_commitish') == 'dev2']
+          print(f'release_count={len(releases)}')
+          print(f'releases_targeting_dev2={len(affected)}')
+          for r in affected:
+              print(r.get('id'), r.get('tag_name'), r.get('target_commitish'))
           PY
 
           # Preserve the exact previous dev2 tip. Never overwrite a different backup.
@@ -75,14 +87,14 @@ jobs:
           fi
 
           # Final freshness check immediately before the history move.
-          git fetch origin dev2
+          git fetch origin '+refs/heads/dev2:refs/remotes/origin/dev2'
           test "$(git rev-parse origin/dev2)" = "$OLD_DEV2"
           remote_candidate="$(git ls-remote --heads origin "$CANDIDATE_REF" | awk '{print $1}')"
           test "$remote_candidate" = "$CANDIDATE"
 
           git push --force-with-lease="refs/heads/dev2:$OLD_DEV2" origin "$CANDIDATE:refs/heads/dev2"
 
-          git fetch origin dev2
+          git fetch origin '+refs/heads/dev2:refs/remotes/origin/dev2'
           NEW_DEV2="$(git rev-parse origin/dev2)"
           test "$NEW_DEV2" = "$CANDIDATE"
           test "$(git show -s --format=%T "$NEW_DEV2")" = "$EXPECTED_TREE"
