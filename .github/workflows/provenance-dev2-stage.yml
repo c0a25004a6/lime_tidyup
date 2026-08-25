@@ -1,0 +1,101 @@
+name: Provenance dev2 candidate staging
+
+on:
+  push:
+    branches:
+      - audit/provenance-dev2-rewrite
+
+permissions:
+  contents: write
+
+jobs:
+  stage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout audit branch with full history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Reconstruct, verify, and stage candidate only
+        shell: bash
+        env:
+          OLD_DEV2: 66c20a90a2f0a1652716f53df886ac9603fbebb1
+          OLD_ROOT: 5252d3a1fd2c5d987a414772f2caf010964b4380
+          BASELINE: 737274733d018596cef24e5d9f9c7c6e4834159d
+          EXPECTED_NEW_ROOT: 8363ae8adcef28c19d2c0370b355bb2953a51647
+          EXPECTED_NEW_HEAD: 22c9578627a5e552352c86071c7a5bd6d6c52a20
+          EXPECTED_TREE: d9fcc2aa0a6c6fd28e4d25f412790064b0649534
+          CANDIDATE_REF: refs/heads/provenance/dev2-rewrite-candidate
+        run: |
+          set -Eeuo pipefail
+
+          git remote remove canonical 2>/dev/null || true
+          git remote add canonical https://github.com/momoiorg-repository/LimeSimulDemo.git
+          git fetch --no-tags canonical main
+          git fetch origin dev2
+
+          # Fresh lease boundary: never stage a candidate for a dev2 that moved.
+          test "$(git rev-parse origin/dev2)" = "$OLD_DEV2"
+          git merge-base --is-ancestor "$BASELINE" canonical/main
+          test "$(git rev-parse "$OLD_ROOT:README.md")" = "$(git rev-parse "$BASELINE:README.md")"
+
+          python3 - "$OLD_ROOT" "$OLD_DEV2" "$BASELINE" <<'PY'
+          import os, subprocess, sys
+          old_root, old_head, baseline = sys.argv[1:]
+          def text(*a): return subprocess.check_output(['git',*a], text=True).rstrip('\n')
+          def raw(c): return subprocess.check_output(['git','cat-file','commit',c])
+          def msg(c): return raw(c).split(b'\n\n',1)[1]
+          def parents(c):
+              p=text('show','-s','--format=%P',c)
+              return p.split() if p else []
+          def recreate(c, ps):
+              env=os.environ.copy()
+              env.update({
+                  'GIT_AUTHOR_NAME':text('show','-s','--format=%an',c),
+                  'GIT_AUTHOR_EMAIL':text('show','-s','--format=%ae',c),
+                  'GIT_AUTHOR_DATE':text('show','-s','--format=%aI',c),
+                  'GIT_COMMITTER_NAME':text('show','-s','--format=%cn',c),
+                  'GIT_COMMITTER_EMAIL':text('show','-s','--format=%ce',c),
+                  'GIT_COMMITTER_DATE':text('show','-s','--format=%cI',c),
+              })
+              cmd=['git','commit-tree',text('show','-s','--format=%T',c)]
+              for p in ps: cmd += ['-p',p]
+              return subprocess.check_output(cmd,input=msg(c),env=env).decode().strip()
+          m={old_root:recreate(old_root,[baseline])}
+          ordered=text('rev-list','--reverse','--topo-order',f'{old_root}..{old_head}').splitlines()
+          for c in ordered:
+              m[c]=recreate(c,[m[p] for p in parents(c)])
+          with open('/tmp/new_root','w') as f:f.write(m[old_root])
+          with open('/tmp/new_head','w') as f:f.write(m[old_head])
+          with open('/tmp/mapping.tsv','w') as f:
+              for c in [old_root]+ordered:f.write(f'{c}\t{m[c]}\n')
+          PY
+
+          NEW_ROOT="$(cat /tmp/new_root)"
+          NEW_HEAD="$(cat /tmp/new_head)"
+          test "$NEW_ROOT" = "$EXPECTED_NEW_ROOT"
+          test "$NEW_HEAD" = "$EXPECTED_NEW_HEAD"
+          test "$(git show -s --format=%T "$NEW_HEAD")" = "$EXPECTED_TREE"
+          test "$(git show -s --format=%T "$OLD_DEV2")" = "$EXPECTED_TREE"
+          git diff --exit-code "$OLD_DEV2" "$NEW_HEAD"
+          git merge-base --is-ancestor "$BASELINE" "$NEW_HEAD"
+          if git merge-base --is-ancestor "$OLD_ROOT" "$NEW_HEAD"; then exit 1; fi
+          test "$(wc -l </tmp/mapping.tsv)" -eq 72
+
+          existing="$(git ls-remote --heads origin "$CANDIDATE_REF" | awk '{print $1}')"
+          if [ -n "$existing" ]; then
+            test "$existing" = "$NEW_HEAD"
+            echo "candidate_already_exact=$existing"
+          else
+            git push origin "$NEW_HEAD:$CANDIDATE_REF"
+          fi
+
+          # Re-fetch the exact remote object we just staged and recheck content.
+          git fetch origin "$CANDIDATE_REF"
+          REMOTE_CANDIDATE="$(git rev-parse FETCH_HEAD)"
+          test "$REMOTE_CANDIDATE" = "$EXPECTED_NEW_HEAD"
+          test "$(git show -s --format=%T "$REMOTE_CANDIDATE")" = "$EXPECTED_TREE"
+          echo "candidate=$REMOTE_CANDIDATE"
+          echo 'STAGING_GREEN'
