@@ -9,11 +9,13 @@ on:
       - yolo_ws/cube8_runtime_smoke.py
       - yolo_ws/cube8_hidden_pnp_smoke.py
       - yolo_ws/cube8_perception_router_smoke.py
+      - yolo_ws/cube8_sparse_depth_smoke.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_geometry.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_pnp.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_pnp_assist.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_projective_hidden.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_perception_router.py
+      - yolo_ws/src/barcode_detector/barcode_detector/cube8_depth_assist.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_grasp.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_transform.py
 
@@ -49,11 +51,13 @@ jobs:
             yolo_ws/cube8_runtime_smoke.py \
             yolo_ws/cube8_hidden_pnp_smoke.py \
             yolo_ws/cube8_perception_router_smoke.py \
+            yolo_ws/cube8_sparse_depth_smoke.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_geometry.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_pnp.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_pnp_assist.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_projective_hidden.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_perception_router.py \
+            yolo_ws/src/barcode_detector/barcode_detector/cube8_depth_assist.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_grasp.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_transform.py
       - name: Run cost-aware perception router smoke
@@ -63,6 +67,11 @@ jobs:
             python3 yolo_ws/cube8_perception_router_smoke.py
       - name: Install geometry smoke dependencies
         run: python3 -m pip install numpy==1.26.4 opencv-python-headless==4.10.0.84
+      - name: Run sparse aligned-depth assist smoke
+        run: |
+          set -euo pipefail
+          PYTHONPATH="$GITHUB_WORKSPACE/yolo_ws/src/barcode_detector" \
+            python3 yolo_ws/cube8_sparse_depth_smoke.py
       - name: Run synthetic PnP plus grasp-frame smoke
         run: |
           set -euo pipefail
