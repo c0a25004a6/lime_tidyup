@@ -23,7 +23,7 @@ setup(
             'roboflow_node = barcode_detector.roboflow_node:main',
             'yolo_pose_node = barcode_detector.yolo_pose_node:main',
             'yolo_save_node = barcode_detector.yolo_save_node:main',
-            'cube8_pose_node = barcode_detector.cube8_pose_node:main',
+            'cube8_pose_node = barcode_detector.cube8_pose_safe_node:main',
         ],
     },
 )

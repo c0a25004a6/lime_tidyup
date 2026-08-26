@@ -12,6 +12,7 @@ on:
       - yolo_ws/cube8_sparse_depth_smoke.py
       - yolo_ws/cube8_view_local_pnp_smoke.py
       - yolo_ws/cube8_pose_node_source_contract.py
+      - yolo_ws/src/barcode_detector/setup.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_geometry.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_pnp.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_pnp_assist.py
@@ -19,6 +20,7 @@ on:
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_two_face_view_local.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_two_face_color_frontend.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_pose_node.py
+      - yolo_ws/src/barcode_detector/barcode_detector/cube8_pose_safe_node.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_projective_hidden.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_perception_router.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_depth_assist.py
@@ -60,6 +62,7 @@ jobs:
             yolo_ws/cube8_sparse_depth_smoke.py \
             yolo_ws/cube8_view_local_pnp_smoke.py \
             yolo_ws/cube8_pose_node_source_contract.py \
+            yolo_ws/src/barcode_detector/setup.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_geometry.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_pnp.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_pnp_assist.py \
@@ -67,12 +70,13 @@ jobs:
             yolo_ws/src/barcode_detector/barcode_detector/cube8_two_face_view_local.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_two_face_color_frontend.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_pose_node.py \
+            yolo_ws/src/barcode_detector/barcode_detector/cube8_pose_safe_node.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_projective_hidden.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_perception_router.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_depth_assist.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_grasp.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_transform.py
-      - name: Prove ROS node keeps RTMPose default and six-observation two-face safety
+      - name: Prove ROS node keeps RTMPose default and fail-closed two-face grasp safety
         run: python3 yolo_ws/cube8_pose_node_source_contract.py
       - name: Run cost-aware perception router smoke
         run: |
