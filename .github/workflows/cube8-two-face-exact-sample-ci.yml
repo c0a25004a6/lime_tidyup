@@ -1,0 +1,63 @@
+name: cube8-two-face-exact-sample-ci
+
+on:
+  push:
+    branches:
+      - work/dev2-cube8-runtime-20260826
+    paths:
+      - yolo_ws/src/barcode_detector/barcode_detector/cube8_two_face_color_frontend.py
+      - yolo_ws/src/barcode_detector/barcode_detector/cube8_two_face_view_local.py
+      - yolo_ws/analyze_cube8_two_face_exact_sample.py
+      - yolo_ws/sample.png
+      - .github/workflows/cube8-two-face-exact-sample-ci.yml
+
+permissions:
+  contents: read
+
+jobs:
+  exact-sample:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify and compile exact-sample frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(sha256sum yolo_ws/sample.png | awk '{print $1}')" = "48eb4331e729900ac82c630e582ca54deff6080d5ad13b11628290495e451841"
+          python3 -m py_compile \
+            yolo_ws/src/barcode_detector/barcode_detector/cube8_two_face_color_frontend.py \
+            yolo_ws/src/barcode_detector/barcode_detector/cube8_two_face_view_local.py \
+            yolo_ws/analyze_cube8_two_face_exact_sample.py
+      - name: Install image geometry dependencies
+        run: python3 -m pip install numpy==1.26.4 opencv-python-headless==4.10.0.84
+      - name: Run exact sample without PnP or CameraInfo
+        shell: bash
+        run: |
+          set -euo pipefail
+          PYTHONPATH="$GITHUB_WORKSPACE/yolo_ws/src/barcode_detector" \
+            python3 yolo_ws/analyze_cube8_two_face_exact_sample.py
+      - name: Verify evidence boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          d=json.loads(Path('artifacts/cube8-two-face-exact/sample-two-face.json').read_text())
+          assert d['view_local_geometry']['gate_passed'] is True
+          assert d['view_local_geometry']['observed_indices']==[2,3,4,5,6,7]
+          assert d['view_local_geometry']['derived_indices']==[1]
+          assert d['view_local_geometry']['hidden_index']==0
+          assert d['claim_boundary']['pnp_run'] is False
+          assert d['claim_boundary']['camera_info_used'] is False
+          assert d['claim_boundary']['physical_robot_authority'] is False
+          assert Path('artifacts/cube8-two-face-exact/sample-two-face-debug.jpg').stat().st_size>0
+          PY
+      - name: Upload exact sample two-face evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev2-cube8-two-face-exact-sample
+          path: artifacts/cube8-two-face-exact/
+          if-no-files-found: error
+          retention-days: 7
