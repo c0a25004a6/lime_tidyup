@@ -10,9 +10,11 @@ on:
       - yolo_ws/cube8_hidden_pnp_smoke.py
       - yolo_ws/cube8_perception_router_smoke.py
       - yolo_ws/cube8_sparse_depth_smoke.py
+      - yolo_ws/cube8_view_local_pnp_smoke.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_geometry.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_pnp.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_pnp_assist.py
+      - yolo_ws/src/barcode_detector/barcode_detector/cube8_view_local_pnp.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_projective_hidden.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_perception_router.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_depth_assist.py
@@ -52,9 +54,11 @@ jobs:
             yolo_ws/cube8_hidden_pnp_smoke.py \
             yolo_ws/cube8_perception_router_smoke.py \
             yolo_ws/cube8_sparse_depth_smoke.py \
+            yolo_ws/cube8_view_local_pnp_smoke.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_geometry.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_pnp.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_pnp_assist.py \
+            yolo_ws/src/barcode_detector/barcode_detector/cube8_view_local_pnp.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_projective_hidden.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_perception_router.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_depth_assist.py \
@@ -82,3 +86,8 @@ jobs:
           set -euo pipefail
           PYTHONPATH="$GITHUB_WORKSPACE/yolo_ws/src/barcode_detector" \
             python3 yolo_ws/cube8_hidden_pnp_smoke.py
+      - name: Run view-local seven-point PnP smoke
+        run: |
+          set -euo pipefail
+          PYTHONPATH="$GITHUB_WORKSPACE/yolo_ws/src/barcode_detector" \
+            python3 yolo_ws/cube8_view_local_pnp_smoke.py
