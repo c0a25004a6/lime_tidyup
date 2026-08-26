@@ -1,0 +1,35 @@
+name: cube8-two-face-view-local-ci
+
+on:
+  push:
+    branches:
+      - work/dev2-cube8-runtime-20260826
+    paths:
+      - yolo_ws/src/barcode_detector/barcode_detector/cube8_two_face_view_local.py
+      - yolo_ws/src/barcode_detector/barcode_detector/cube8_view_local_pnp.py
+      - yolo_ws/cube8_two_face_view_local_smoke.py
+      - .github/workflows/cube8-two-face-view-local-ci.yml
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile two-face view-local runtime
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            yolo_ws/src/barcode_detector/barcode_detector/cube8_two_face_view_local.py \
+            yolo_ws/src/barcode_detector/barcode_detector/cube8_view_local_pnp.py \
+            yolo_ws/cube8_two_face_view_local_smoke.py
+      - name: Install geometry runtime dependencies
+        run: python3 -m pip install numpy==1.26.4 opencv-python-headless==4.10.0.84
+      - name: Prove two observed face quads feed only six independent PnP points
+        run: |
+          set -euo pipefail
+          PYTHONPATH="$GITHUB_WORKSPACE/yolo_ws/src/barcode_detector" \
+            python3 yolo_ws/cube8_two_face_view_local_smoke.py
