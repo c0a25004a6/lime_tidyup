@@ -11,10 +11,14 @@ on:
       - yolo_ws/cube8_perception_router_smoke.py
       - yolo_ws/cube8_sparse_depth_smoke.py
       - yolo_ws/cube8_view_local_pnp_smoke.py
+      - yolo_ws/cube8_pose_node_source_contract.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_geometry.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_pnp.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_pnp_assist.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_view_local_pnp.py
+      - yolo_ws/src/barcode_detector/barcode_detector/cube8_two_face_view_local.py
+      - yolo_ws/src/barcode_detector/barcode_detector/cube8_two_face_color_frontend.py
+      - yolo_ws/src/barcode_detector/barcode_detector/cube8_pose_node.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_projective_hidden.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_perception_router.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_depth_assist.py
@@ -46,7 +50,7 @@ jobs:
           path: artifacts/dev2-sample/
           if-no-files-found: error
           retention-days: 7
-      - name: Compile migrated pure runtime
+      - name: Compile migrated pure runtime and ROS node source
         run: |
           set -euo pipefail
           python3 -m py_compile \
@@ -55,15 +59,21 @@ jobs:
             yolo_ws/cube8_perception_router_smoke.py \
             yolo_ws/cube8_sparse_depth_smoke.py \
             yolo_ws/cube8_view_local_pnp_smoke.py \
+            yolo_ws/cube8_pose_node_source_contract.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_geometry.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_pnp.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_pnp_assist.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_view_local_pnp.py \
+            yolo_ws/src/barcode_detector/barcode_detector/cube8_two_face_view_local.py \
+            yolo_ws/src/barcode_detector/barcode_detector/cube8_two_face_color_frontend.py \
+            yolo_ws/src/barcode_detector/barcode_detector/cube8_pose_node.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_projective_hidden.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_perception_router.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_depth_assist.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_grasp.py \
             yolo_ws/src/barcode_detector/barcode_detector/cube8_transform.py
+      - name: Prove ROS node keeps RTMPose default and six-observation two-face safety
+        run: python3 yolo_ws/cube8_pose_node_source_contract.py
       - name: Run cost-aware perception router smoke
         run: |
           set -euo pipefail
