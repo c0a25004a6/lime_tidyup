@@ -67,7 +67,16 @@ python3 -m barcode_detector.cube8_sim_setup \
   >"$evidence_dir/setup.log" 2>&1
 
 ros2 topic list | sort >"$evidence_dir/topics.txt"
-grep -Fxq /cube8_sim/camera/camera_info "$evidence_dir/topics.txt"
+if ! grep -Fxq /cube8_sim/camera/camera_info "$evidence_dir/topics.txt"; then
+  echo "expected camera topic did not appear: /cube8_sim/camera/camera_info" >&2
+  echo "--- ROS topics ---" >&2
+  cat "$evidence_dir/topics.txt" >&2
+  echo "--- sim setup ---" >&2
+  cat "$evidence_dir/setup.log" >&2
+  echo "--- Gazebo tail ---" >&2
+  tail -n 120 "$evidence_dir/gazebo.log" >&2
+  exit 1
+fi
 timeout 20 ros2 topic echo --once /cube8_sim/camera/camera_info \
   >"$evidence_dir/camera_info.yaml"
 
