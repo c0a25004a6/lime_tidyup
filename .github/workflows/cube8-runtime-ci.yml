@@ -60,11 +60,12 @@ jobs:
             -v "$GITHUB_WORKSPACE:/work:rw" \
             -w /work \
             osrf/ros:humble-desktop-full bash -lc '
-              set -euo pipefail
+              set -eo pipefail
               apt-get update -qq
               DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
                 ros-humble-gazebo-ros-pkgs python3-opencv
               source /opt/ros/humble/setup.bash
+              set -u
               bash /work/yolo_ws/cube8_sim_roundtrip.sh /work/yolo_ws/cube8_sim_evidence
             '
 
