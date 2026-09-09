@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}\")/.." && pwd)"
 world="$repo_root/yolo_ws/cube8_sim_empty.world"
 evidence_dir="${1:-$repo_root/yolo_ws/cube8_sim_evidence}"
 mkdir -p "$evidence_dir"
@@ -109,7 +109,7 @@ if ! grep -Fxq /cube8_sim/camera/camera_info "$evidence_dir/topics.txt"; then
   tail -n 120 "$evidence_dir/gazebo.log" >&2
   exit 1
 fi
-timeout 20 ros2 topic echo --once /cube8_sim/camera/camera_info \
+timeout 20 ros2 topic echo --once --full-length /cube8_sim/camera/camera_info \
   >"$evidence_dir/camera_info.yaml"
 
 python3 -m barcode_detector.cube8_sim_compare \
@@ -122,9 +122,9 @@ python3 -m barcode_detector.cube8_sim_pnp_probe \
   >"$evidence_dir/pnp_probe.log" 2>&1 &
 pids+=("$!")
 
-timeout 30 ros2 topic echo --once /cube8_pose_result \
+timeout 30 ros2 topic echo --once --full-length /cube8_pose_result \
   >"$evidence_dir/pnp_result.yaml"
-timeout 30 ros2 topic echo --once /cube8_sim/roundtrip_status \
+timeout 30 ros2 topic echo --once --full-length /cube8_sim/roundtrip_status \
   >"$evidence_dir/roundtrip_status.yaml"
 
 grep -Fq '"status": "accepted"' "$evidence_dir/pnp_result.yaml"
