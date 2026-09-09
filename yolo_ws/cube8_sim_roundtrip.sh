@@ -84,6 +84,19 @@ wait_for_service() {
   return 1
 }
 
+wait_for_topic() {
+  local name="$1"
+  local attempts="${2:-80}"
+  for ((i=0; i<attempts; i++)); do
+    if ros2 topic list 2>/dev/null | grep -Fxq "$name"; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "topic did not appear: $name" >&2
+  return 1
+}
+
 gzserver --verbose \
   -s libgazebo_ros_init.so \
   -s libgazebo_ros_factory.so \
@@ -121,6 +134,9 @@ pids+=("$!")
 python3 -m barcode_detector.cube8_sim_pnp_probe \
   >"$evidence_dir/pnp_probe.log" 2>&1 &
 pids+=("$!")
+
+wait_for_topic /cube8_pose_result
+wait_for_topic /cube8_sim/roundtrip_status
 
 timeout 30 ros2 topic echo --once --full-length /cube8_pose_result \
   >"$evidence_dir/pnp_result.yaml"
