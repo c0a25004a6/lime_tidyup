@@ -19,6 +19,21 @@ pids=()
 cleanup() {
   if ((${#pids[@]})); then
     kill "${pids[@]}" 2>/dev/null || true
+    local live
+    for _ in {1..20}; do
+      live=0
+      for pid in "${pids[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+          live=1
+          break
+        fi
+      done
+      if ((live == 0)); then
+        break
+      fi
+      sleep 0.1
+    done
+    kill -KILL "${pids[@]}" 2>/dev/null || true
     wait "${pids[@]}" 2>/dev/null || true
   fi
 }
@@ -45,6 +60,7 @@ gzserver --verbose \
 pids+=("$!")
 
 wait_for_service /spawn_entity
+ros2 service list | sort >"$evidence_dir/services.txt"
 wait_for_service /gazebo/set_entity_state
 
 python3 -m barcode_detector.cube8_sim_setup \
