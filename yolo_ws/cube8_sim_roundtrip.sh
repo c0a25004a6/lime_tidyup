@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}\")/.." && pwd)"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 world="$repo_root/yolo_ws/cube8_sim_empty.world"
 evidence_dir="${1:-$repo_root/yolo_ws/cube8_sim_evidence}"
 mkdir -p "$evidence_dir"
