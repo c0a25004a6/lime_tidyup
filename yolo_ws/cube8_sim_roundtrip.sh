@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+world="$repo_root/yolo_ws/cube8_sim_empty.world"
+evidence_dir="${1:-$repo_root/yolo_ws/cube8_sim_evidence}"
+mkdir -p "$evidence_dir"
+
+command -v ros2 >/dev/null
+command -v gzserver >/dev/null
+python3 -c 'import cv2, rclpy'
+
+export PYTHONPATH="$repo_root/yolo_ws/src/barcode_detector${PYTHONPATH:+:$PYTHONPATH}"
+export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-82}"
+export GAZEBO_MASTER_URI="${GAZEBO_MASTER_URI:-http://127.0.0.1:11389}"
+export GAZEBO_MODEL_DATABASE_URI=""
+
+pids=()
+cleanup() {
+  if ((${#pids[@]})); then
+    kill "${pids[@]}" 2>/dev/null || true
+    wait "${pids[@]}" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT
+
+wait_for_service() {
+  local name="$1"
+  local attempts="${2:-80}"
+  for ((i=0; i<attempts; i++)); do
+    if ros2 service list 2>/dev/null | grep -Fxq "$name"; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  echo "service did not appear: $name" >&2
+  return 1
+}
+
+gzserver --verbose \
+  -s libgazebo_ros_init.so \
+  -s libgazebo_ros_factory.so \
+  "$world" \
+  >"$evidence_dir/gazebo.log" 2>&1 &
+pids+=("$!")
+
+wait_for_service /spawn_entity
+wait_for_service /gazebo/set_entity_state
+
+python3 -m barcode_detector.cube8_sim_setup \
+  >"$evidence_dir/setup.log" 2>&1
+
+ros2 topic list | sort >"$evidence_dir/topics.txt"
+grep -Fxq /cube8_sim/camera/camera_info "$evidence_dir/topics.txt"
+timeout 20 ros2 topic echo --once /cube8_sim/camera/camera_info \
+  >"$evidence_dir/camera_info.yaml"
+
+python3 -m barcode_detector.cube8_sim_compare \
+  >"$evidence_dir/compare.log" 2>&1 &
+pids+=("$!")
+python3 -m barcode_detector.cube8_sim_gazebo_bridge \
+  >"$evidence_dir/bridge.log" 2>&1 &
+pids+=("$!")
+python3 -m barcode_detector.cube8_sim_pnp_probe \
+  >"$evidence_dir/pnp_probe.log" 2>&1 &
+pids+=("$!")
+
+timeout 30 ros2 topic echo --once /cube8_pose_result \
+  >"$evidence_dir/pnp_result.yaml"
+timeout 30 ros2 topic echo --once /cube8_sim/roundtrip_status \
+  >"$evidence_dir/roundtrip_status.yaml"
+
+grep -Fq '"status": "accepted"' "$evidence_dir/pnp_result.yaml"
+grep -Fq '"physical_robot_authority": false' "$evidence_dir/pnp_result.yaml"
+grep -Fq '"status": "PASS"' "$evidence_dir/roundtrip_status.yaml"
+grep -Fq '"physical_robot_authority": false' "$evidence_dir/roundtrip_status.yaml"
+
+cat "$evidence_dir/roundtrip_status.yaml"
