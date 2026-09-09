@@ -9,6 +9,8 @@ on:
       - Dockerfile.yolo
       - yolo_ws/visualize_cube8_pipeline.py
       - yolo_ws/cube8_runtime_smoke.py
+      - yolo_ws/cube8_sim_empty.world
+      - yolo_ws/cube8_sim_roundtrip.sh
       - yolo_ws/src/barcode_detector/setup.py
       - yolo_ws/src/barcode_detector/barcode_detector/cube8_*.py
 
@@ -16,6 +18,65 @@ permissions:
   contents: read
 
 jobs:
+  sim-roundtrip:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Static sim contract checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile \
+            yolo_ws/src/barcode_detector/barcode_detector/cube8_sim_setup.py \
+            yolo_ws/src/barcode_detector/barcode_detector/cube8_sim_pnp_probe.py \
+            yolo_ws/src/barcode_detector/barcode_detector/cube8_sim_gazebo_bridge.py \
+            yolo_ws/src/barcode_detector/barcode_detector/cube8_sim_compare.py
+          python3 - <<'PY'
+          import runpy
+          import xml.etree.ElementTree as ET
+
+          path = 'yolo_ws/src/barcode_detector/barcode_detector/cube8_sim_setup.py'
+          mod = runpy.run_path(path)
+          root = ET.fromstring(mod['build_rubiks_sdf']())
+          visuals = root.findall('.//visual')
+          cubies = [v for v in visuals if v.attrib['name'].startswith('cubie_')]
+          stickers = [v for v in visuals if v.attrib['name'].startswith('sticker_')]
+          assert mod['CUBE_SIDE_M'] == 0.057
+          assert len(cubies) == 27
+          assert len(stickers) == 54
+          print('Cube8 sim target: 0.057 m, 27 cubies, 54 stickers')
+          PY
+
+      - name: CameraInfo to PnP to Gazebo roundtrip
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p yolo_ws/cube8_sim_evidence
+          docker run --rm --network host \
+            -e ROS_DOMAIN_ID=82 \
+            -e GAZEBO_MASTER_URI=http://127.0.0.1:11389 \
+            -v "$GITHUB_WORKSPACE:/work:rw" \
+            -w /work \
+            osrf/ros:humble-desktop-full bash -lc '
+              set -euo pipefail
+              apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                ros-humble-gazebo-ros-pkgs python3-opencv
+              source /opt/ros/humble/setup.bash
+              bash /work/yolo_ws/cube8_sim_roundtrip.sh /work/yolo_ws/cube8_sim_evidence
+            '
+
+      - name: Upload Gazebo roundtrip evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cube8-sim-roundtrip-evidence
+          path: yolo_ws/cube8_sim_evidence/
+          if-no-files-found: warn
+          retention-days: 7
+
   verify:
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 20
