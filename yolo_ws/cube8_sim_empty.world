@@ -32,6 +32,10 @@
       </link>
     </model>
 
-    <plugin name='gazebo_ros_state' filename='libgazebo_ros_state.so'/>
+    <plugin name='gazebo_ros_state' filename='libgazebo_ros_state.so'>
+      <ros>
+        <namespace>/gazebo</namespace>
+      </ros>
+    </plugin>
   </world>
 </sdf>
