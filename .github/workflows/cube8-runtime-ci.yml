@@ -57,16 +57,18 @@ jobs:
           docker run --rm --network host \
             -e ROS_DOMAIN_ID=82 \
             -e GAZEBO_MASTER_URI=http://127.0.0.1:11389 \
+            -e LIBGL_ALWAYS_SOFTWARE=1 \
             -v "$GITHUB_WORKSPACE:/work:rw" \
             -w /work \
             osrf/ros:humble-desktop-full bash -lc '
               set -eo pipefail
               apt-get update -qq
               DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-                ros-humble-gazebo-ros-pkgs python3-opencv
+                ros-humble-gazebo-ros-pkgs python3-opencv xvfb xauth
               source /opt/ros/humble/setup.bash
               set -u
-              bash /work/yolo_ws/cube8_sim_roundtrip.sh /work/yolo_ws/cube8_sim_evidence
+              xvfb-run -a -s "-screen 0 1280x720x24" \
+                bash /work/yolo_ws/cube8_sim_roundtrip.sh /work/yolo_ws/cube8_sim_evidence
             '
 
       - name: Upload Gazebo roundtrip evidence
