@@ -37,7 +37,39 @@ cleanup() {
     wait "${pids[@]}" 2>/dev/null || true
   fi
 }
-trap cleanup EXIT
+
+dump_failure_evidence() {
+  local file
+  for file in \
+    camera_info.yaml \
+    pnp_result.yaml \
+    roundtrip_status.yaml \
+    pnp_probe.log \
+    bridge.log \
+    compare.log \
+    setup.log \
+    topics.txt \
+    services.txt; do
+    if [[ -f "$evidence_dir/$file" ]]; then
+      echo "--- $file ---" >&2
+      cat "$evidence_dir/$file" >&2
+    fi
+  done
+  if [[ -f "$evidence_dir/gazebo.log" ]]; then
+    echo "--- gazebo.log tail ---" >&2
+    tail -n 120 "$evidence_dir/gazebo.log" >&2
+  fi
+}
+
+on_exit() {
+  local rc=$?
+  if ((rc != 0)); then
+    dump_failure_evidence
+  fi
+  cleanup
+  return "$rc"
+}
+trap on_exit EXIT
 
 wait_for_service() {
   local name="$1"
